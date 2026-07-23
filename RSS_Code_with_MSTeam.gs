@@ -441,8 +441,12 @@ ${TARGET_THEMES.map(t => `- ${t}`).join("\n")}
 
 # Rules for Selection:
 1. ONLY extract news that matches at least one of the Target Agricultural Products AND covers at least one of the Target Themes.
-2. EXCLUDE general restaurant food prices, cooking recipes, general politics, or unrelated economic gossip.
-3. If no articles match the criteria, return an empty array [].
+2. STRICT EXCLUSIONS:
+   - EXCLUDE local charity, merit-making (ทำบุญ/ทำทาน), Buddhist ceremony sponsorships (เช่น วางศิลาฤกษ์, ทอดกฐิน, งานบวช), local community donations, private foundation handouts, or politician CSR/local public relations events where rice/agricultural products are given out as small-scale gifts or alms.
+   - EXCLUDE general restaurant food prices, cooking recipes, general politics, or unrelated economic gossip.
+3. ALLOWED EXCEPTIONS:
+   - ALLOW government-to-government (G2G) trade/grants, bilateral/multilateral official humanitarian aid (เช่น รัฐบาลไทยส่งข้าวสารช่วยเหลือผู้ประสบภัยระดับประเทศหรือประเทศเพื่อนบ้าน เช่น สปป.ลาว), or official national-level agricultural emergency relief programs.
+4. If no articles match the criteria, return an empty array [].
 
 # Extraction Fields Schema:
 For each relevant news article, extract and translate the fields as follows:
