@@ -7,6 +7,7 @@ const PROP_SHEET_NAME = "SHEET_NAME"; // ชื่อ Tab ที่ต้อง�
 const PROP_MODEL_NAME = "GEMINI_MODEL_NAME"; // ชื่อโมเดลสำหรับคัดแยกและวิเคราะห์ข่าว
 const PROP_EMAIL_RECIPIENT = "NOTIFICATION_EMAIL";
 const PROP_TEAMS_WEBHOOK = "TEAMS_WEBHOOK_URL"; // Webhook URL สำหรับ MS Teams
+const PROP_SCRAPER_KEY = "SCRAPER_API_KEY";     // API Key สำหรับ ScraperAPI (มติชน / ประชาชาติ)
 
 // ==========================================================================
 // CUSTOMIZABLE PARAMETERS (ส่วนสำหรับเพิ่มคำค้นหา/หัวข้อเป้าหมายข่าวเกษตรกรรม)
@@ -163,6 +164,18 @@ function startRssNewsAgent() {
 
 // ฟังก์ชันดึง XML พร้อมจำลอง User-Agent เพื่อป้องกัน Error 403 และล้าง Entity ที่ไม่ถูกต้องใน XML
 function fetchXml(url) {
+  const p = PropertiesService.getScriptProperties();
+  const scraperApiKey = p.getProperty(PROP_SCRAPER_KEY);
+  
+  // ตรวจจับว่าต้องใช้ Proxy หรือไม่ (เฉพาะมติชนและประชาชาติธุรกิจที่ติด 403)
+  const isBlockedSite = url.includes("matichon.co.th") || url.includes("prachachat.net");
+  
+  let finalUrl = url;
+  if (isBlockedSite && scraperApiKey) {
+    finalUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url);
+    Logger.log("Fetching via ScraperAPI Proxy for: " + url);
+  }
+  
   const options = {
     method: "get",
     muteHttpExceptions: true,
@@ -172,10 +185,10 @@ function fetchXml(url) {
     }
   };
   
-  const response = UrlFetchApp.fetch(url, options);
+  const response = UrlFetchApp.fetch(finalUrl, options);
   const code = response.getResponseCode();
   if (code !== 200) {
-    throw new Error("HTTP Error " + code + " when fetching " + url);
+    throw new Error("HTTP Error " + code + " when fetching via " + (finalUrl === url ? "Direct" : "Proxy") + " for " + url);
   }
   return sanitizeXmlEntities(response.getContentText());
 }

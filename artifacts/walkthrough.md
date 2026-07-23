@@ -29,8 +29,8 @@
 2. สร้างไฟล์สคริปต์ใหม่ (หรือใช้ไฟล์เดิมที่คุณสร้างไว้แล้ว) และตั้งชื่อว่า **`RSS_Code_with_MSTeam`**
 3. คัดลอกโค้ดทั้งหมดในไฟล์ [RSS_Code_with_MSTeam.gs](file:///d:/Project/Thai%20News/RSS_Code_with_MSTeam.gs) ไปวางทับไฟล์นั้นทั้งหมด
 4. ไปที่สัญลักษณ์ฟันเฟือง ⚙️ (**การตั้งค่าโครงการ / Project Settings**) เลื่อนลงมาในส่วน **คุณสมบัติของสคริปต์ (Script Properties)**
-5. ทำการเพิ่มคู่ตัวแปรใหม่สำหรับ MS Teams:
-   * **Property:** `TEAMS_WEBHOOK_URL` 
-   * **Value:** *(Webhook URL ที่คุณได้รับมาจากแชนแนล MS Teams ของคุณ)*
-6. กดปุ่มบันทึกคุณสมบัติ
+5. ทำการเพิ่มตัวแปรที่จำเป็นในการแจ้งเตือนและระบบดึงข้อมูลหลบเลี่ยงบล็อก (403):
+   * **Property:** `TEAMS_WEBHOOK_URL` | **Value:** *(Webhook URL ที่คุณได้รับมาจากแชนแนล MS Teams ของคุณ)*
+   * **Property:** `SCRAPER_API_KEY` | **Value:** *(API Key ที่คุณสมัครและได้รับจาก ScraperAPI)*
+6. กดปุ่มบันทึกคุณสมบัติ (Save script properties)
 7. สั่งรันฟังก์ชันหลัก **`startRssNewsAgent`** เพื่อเริ่มทดสอบการทำงานของระบบพาร์สและส่งการแจ้งเตือนได้เลยครับ!
