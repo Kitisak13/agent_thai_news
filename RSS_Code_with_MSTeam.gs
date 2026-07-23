@@ -8,6 +8,7 @@ const PROP_MODEL_NAME = "GEMINI_MODEL_NAME"; // ชื่อโมเดลส�
 const PROP_EMAIL_RECIPIENT = "NOTIFICATION_EMAIL";
 const PROP_TEAMS_WEBHOOK = "TEAMS_WEBHOOK_URL"; // Webhook URL สำหรับ MS Teams
 const PROP_SCRAPER_KEY = "SCRAPER_API_KEY";     // API Key สำหรับ ScraperAPI (มติชน / ประชาชาติ)
+const PROP_DRIVE_FOLDER = "DRIVE_FOLDER_ID";    // Folder ID ของ Google Drive ที่จะเก็บเล่มรายงาน Google Doc
 
 // ==========================================================================
 // CUSTOMIZABLE PARAMETERS (ส่วนสำหรับเพิ่มคำค้นหา/หัวข้อเป้าหมายข่าวเกษตรกรรม)
@@ -145,10 +146,34 @@ function startRssNewsAgent() {
     // 4. บันทึกผลลัพธ์ลง Google Sheet
     const newItems = saveJsonToSheet(jsonArray);
     
-    // 5. ส่งการแจ้งเตือนหากมีข่าวใหม่เข้ามา
+    // 5. หากมีข่าวใหม่ ให้ทำเอกสารรายงานและส่งการแจ้งเตือน
     if (newItems && newItems.length > 0) {
-      sendEmailNotification(newItems);      // ส่งแจ้งเตือนผ่าน E-mail
-      sendTeamsNotification(newItems);     // ส่งแจ้งเตือนผ่าน MS Teams
+      let docUrl = "";
+      try {
+        const folderId = p.getProperty(PROP_DRIVE_FOLDER);
+        const doc = getOrCreateDailyDoc(folderId);
+        
+        // วนลูปสกัดเนื้อหาและภาพเพื่อบันทึกลง Doc
+        newItems.forEach(item => {
+          if (item.url) {
+            Logger.log(`Processing Google Doc content for: ${item.headline}`);
+            const fullText = fetchFullContentWithGemini(item.url, apiKey);
+            const imageBlob = fetchFeaturedImage(item.url);
+            appendNewsToDoc(doc, item, fullText, imageBlob);
+          }
+        });
+        
+        // ดึงแชร์ลิงก์ของ Google Doc และปิดประมวลผลเซฟไฟล์
+        docUrl = doc.getUrl();
+        doc.saveAndClose();
+        Logger.log(`Successfully updated Daily Google Doc: ${docUrl}`);
+      } catch (docError) {
+        Logger.log("ERROR managing Google Doc daily report: " + docError.toString());
+      }
+      
+      // ส่งการแจ้งเตือนพร้อมส่งแชร์ลิงก์ Google Doc เข้าไปด้วย
+      sendEmailNotification(newItems, docUrl);      // ส่งแจ้งเตือนผ่าน E-mail
+      sendTeamsNotification(newItems, docUrl);     // ส่งแจ้งเตือนผ่าน MS Teams
     } else {
       Logger.log("No new news items to notify.");
     }
@@ -598,7 +623,7 @@ function saveJsonToSheet(jsonArray) {
 // ==========================================
 // 5. ส่งอีเมลแจ้งเตือนข่าวใหม่ล่าสุด (Email Notification)
 // ==========================================
-function sendEmailNotification(newItems) {
+function sendEmailNotification(newItems, docUrl) {
   const p = PropertiesService.getScriptProperties();
   const recipient = p.getProperty(PROP_EMAIL_RECIPIENT) || "Kitisak.jun@cpintertrade.com";
   
@@ -607,11 +632,12 @@ function sendEmailNotification(newItems) {
     return;
   }
   
-  let subject = `[ข่าวข้าวใหม่ - RSS] มีข่าวใหม่จำนวน ${newItems.length} รายการ`;
+  let subject = `[ข่าวใหม่ - RSS] มีข่าวใหม่จำนวน ${newItems.length} รายการ`;
   
   let htmlBody = `
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; background-color: #fcfcfc;">
-      <h2 style="color: #2e7d32; border-bottom: 2px solid #2e7d32; padding-bottom: 10px; margin-top: 0;">📢 รายงานข่าวข้าวจาก RSS & Sitemap</h2>
+      <h2 style="color: #2e7d32; border-bottom: 2px solid #2e7d32; padding-bottom: 10px; margin-top: 0;">📢 รายงานข่าวจาก RSS & Sitemap</h2>
+      ${docUrl ? `<p style="margin: 15px 0; text-align: center;"><a href="${docUrl}" target="_blank" style="display: inline-block; background-color: #2e7d32; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 4px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">📄 เปิดอ่านเล่มรายงานประจำวัน (Google Doc)</a></p>` : ""}
       <p style="color: #555;">พบข่าวสารใหม่จากการสแกนเมื่อเวลา ${Utilities.formatDate(new Date(), "Asia/Bangkok", "dd/MM/yyyy HH:mm")} น. รายละเอียดข่าวมีดังนี้:</p>
       <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
   `;
@@ -653,9 +679,9 @@ function sendEmailNotification(newItems) {
 }
 
 // ==========================================
-// 6. ส่งอีเมลแจ้งเตือนข่าวใหม่ล่าสุดไปยัง Microsoft Teams
+// 6. ส่งการแจ้งเตือนข่าวใหม่ล่าสุดไปยัง Microsoft Teams
 // ==========================================
-function sendTeamsNotification(newItems) {
+function sendTeamsNotification(newItems, docUrl) {
   const p = PropertiesService.getScriptProperties();
   const webhookUrl = p.getProperty(PROP_TEAMS_WEBHOOK);
   
@@ -668,7 +694,7 @@ function sendTeamsNotification(newItems) {
   const cardBody = [
     {
       "type": "TextBlock",
-      "text": "📢 รายงานข่าวข้าวใหม่ล่าสุด (RSS & Sitemap)",
+      "text": "📢 รายงานข่าวประจำวันล่าสุด (RSS & Sitemap)",
       "weight": "Bolder",
       "size": "Medium",
       "color": "Good"
@@ -682,6 +708,15 @@ function sendTeamsNotification(newItems) {
   ];
   
   const cardActions = [];
+  
+  // เพิ่มปุ่มเปิดเล่มรายงาน Google Doc เป็นอันดับแรก
+  if (docUrl) {
+    cardActions.push({
+      "type": "Action.OpenUrl",
+      "title": "📄 เปิดเล่มรายงานข่าวประจำวัน",
+      "url": docUrl
+    });
+  }
   
   newItems.forEach((item, index) => {
     // เพิ่มข้อมูลข่าวแต่ละข่าวลงใน body
@@ -743,4 +778,239 @@ function sendTeamsNotification(newItems) {
   } catch (e) {
     Logger.log("ERROR sending MS Teams notification: " + e.toString());
   }
+}
+
+// ==========================================
+// 7. ระบบจัดทำเล่มรายงานข่าวสรุปรายวันบน Google Doc
+// ==========================================
+
+// ค้นหาหรือสร้างโฟลเดอร์เก็บรายงาน และสร้างหรือเปิดไฟล์ Google Doc ประจำวันสำหรับ Append ข้อมูลข่าว
+function getOrCreateDailyDoc(folderId) {
+  const today = new Date();
+  const dateString = Utilities.formatDate(today, "Asia/Bangkok", "yyyy-MM-dd");
+  const fileName = "รายงานข่าวประจำวัน " + dateString;
+  
+  // 1. ค้นหาโฟลเดอร์สำหรับเก็บรายงานประจำวัน
+  let folder;
+  if (folderId) {
+    try {
+      folder = DriveApp.getFolderById(folderId);
+    } catch (e) {
+      Logger.log("WARNING: ไม่สามารถเข้าถึง DRIVE_FOLDER_ID ได้ ระบบจะใช้ Root โฟลเดอร์แทน. Error: " + e.toString());
+      folder = DriveApp.getRootFolder();
+    }
+  } else {
+    // หาโฟลเดอร์ "รายงานข่าวประจำวัน" ถ้าไม่มีให้สร้างใหม่ใน Root
+    const folders = DriveApp.getFoldersByName("รายงานข่าวประจำวัน");
+    if (folders.hasNext()) {
+      folder = folders.next();
+    } else {
+      folder = DriveApp.createFolder("รายงานข่าวประจำวัน");
+    }
+  }
+  
+  // 2. ค้นหาไฟล์รายงานของวันปัจจุบันในโฟลเดอร์
+  const files = folder.getFilesByName(fileName);
+  if (files.hasNext()) {
+    const file = files.next();
+    Logger.log("Opened existing Daily Doc: " + fileName);
+    return DocumentApp.openById(file.getId());
+  } else {
+    // หากไม่พบ ให้สร้างเอกสารรายงานใหม่ของวันนี้
+    Logger.log("Creating new Daily Doc: " + fileName);
+    const doc = DocumentApp.create(fileName);
+    const docFile = DriveApp.getFileById(doc.getId());
+    
+    // ย้ายตำแหน่งไฟล์ไปวางในโฟลเดอร์เป้าหมาย
+    docFile.moveTo(folder);
+    
+    // จัดรูปแบบหน้าเอกสาร
+    const body = doc.getBody();
+    body.clear();
+    
+    // หน้าปกรวมหัวเรื่องตัวโต
+    const titleParagraph = body.appendParagraph("รายงานข่าวประจำวัน " + dateString);
+    titleParagraph.setHeading(DocumentApp.ParagraphHeading.TITLE);
+    titleParagraph.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    
+    body.appendHorizontalRule();
+    
+    doc.saveAndClose();
+    return DocumentApp.openById(doc.getId());
+  }
+}
+
+// โหลดโค้ด HTML ของหน้าข่าวเพื่อสกัดภาพหน้าปก / อินโฟกราฟิกหลักผ่าน og:image tag
+function fetchFeaturedImage(url) {
+  try {
+    const html = fetchXml(url);
+    if (!html) return null;
+    
+    // ใช้ Regex ค้นหาแท็ก og:image ใน HTML ของบทความ
+    const regex = /meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i;
+    const match = html.match(regex);
+    if (match && match[1]) {
+      const imageUrl = match[1].trim();
+      Logger.log("Found og:image URL: " + imageUrl);
+      
+      const response = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
+      if (response.getResponseCode() === 200) {
+        return response.getBlob();
+      }
+    }
+  } catch (e) {
+    Logger.log("WARNING: ไม่สามารถโหลดรูปภาพประกอบของหน้าเว็บได้ " + url + ". Error: " + e.toString());
+  }
+  return null;
+}
+
+// ทำความสะอาด HTML ดิบโดยตัด script/style ออกเพื่อลดจำนวน Token ก่อนส่งให้ AI
+function cleanHtmlForAI(html) {
+  if (!html) return "";
+  let text = html;
+  
+  // ลบแท็ก script และ style ทั้งหมด
+  text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+  
+  // สกัดเอาเฉพาะเนื้อความภายในแท็ก body
+  const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  if (bodyMatch) {
+    text = bodyMatch[1];
+  }
+  
+  // ล้างช่องว่างที่มากเกินความจำเป็น
+  text = text.replace(/\s+/g, " ").trim();
+  
+  // ตัดเนื้อหาไว้สูงสุดที่ 50,000 อักษรเพื่อเซฟความเร็วและ Token ของโมเดล
+  if (text.length > 50000) {
+    text = text.substring(0, 50000);
+  }
+  return text;
+}
+
+// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini ทำการสกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์
+function fetchFullContentWithGemini(url, apiKey) {
+  try {
+    const rawHtml = fetchXml(url);
+    const cleanedText = cleanHtmlForAI(rawHtml);
+    
+    if (!cleanedText) return "ไม่สามารถดึงข้อมูลเนื้อหาหลักของข่าวได้";
+    
+    const p = PropertiesService.getScriptProperties();
+    const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-1.5-flash";
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+    
+    const prompt = `
+You are a news transcription assistant.
+Your job is to read the provided raw webpage content of a Thai news article and extract the full, detailed body text of the article in Thai.
+
+Rules:
+1. ONLY extract the main news article content.
+2. EXCLUDE all advertisements, navigation menus, footer text, sidebar widgets, related articles lists, sign-up forms, and reader comments.
+3. Keep the full detailed reporting prose. Do not summarize it to 3 lines; keep it detailed so the user can read the complete article.
+4. Format the output with clean Thai paragraph breaks.
+5. If there are subheadings in the article, format them with bold text.
+6. Do NOT include any introductory or concluding comments in your output. Just output the extracted news text.
+`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            { text: "Here is the raw webpage text:\n" + cleanedText }
+          ]
+        }
+      ]
+    };
+
+    const options = {
+      method: "post",
+      contentType: "application/json; charset=utf-8",
+      headers: {
+        "x-goog-api-key": apiKey
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    const response = UrlFetchApp.fetch(geminiUrl, options);
+    const responseJson = JSON.parse(response.getContentText());
+    
+    if (responseJson.candidates && responseJson.candidates[0].content.parts[0].text) {
+      return responseJson.candidates[0].content.parts[0].text.trim();
+    }
+  } catch (e) {
+    Logger.log("ERROR extracting full content with Gemini: " + e.toString());
+  }
+  return "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้";
+}
+
+// นำข่าว สรุปย่อ ภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกต่อท้าย (Append) ในเล่ม Google Doc
+function appendNewsToDoc(doc, item, fullText, imageBlob) {
+  const body = doc.getBody();
+  
+  // 1. หัวข้อข่าวหลัก (Heading 2)
+  const headingText = `${item.source || "ไม่ระบุแหล่งข่าว"} - ${item.headline || "ไม่มีหัวข้อข่าว"}`;
+  const heading = body.appendParagraph(headingText);
+  heading.setHeading(DocumentApp.ParagraphHeading.HEADING_2);
+  heading.setBold(true);
+  heading.setSpacingBefore(12);
+  
+  // 2. ข้อมูลสถิติของข่าว (Meta data)
+  const metaText = `📅 วันที่เผยแพร่: ${item.publish_date || "ไม่ระบุ"} | 📁 หมวดหมู่: ${item.category || "ราคาและการค้า"} | 🎯 ผลกระทบ: ${item.impact || "Low"}\n🔗 ลิงก์ข่าวต้นฉบับ: ${item.url || "ไม่มี"}`;
+  const metaParagraph = body.appendParagraph(metaText);
+  metaParagraph.setItalic(true);
+  metaParagraph.setFontSize(10);
+  metaParagraph.setForegroundColor("#666666");
+  metaParagraph.setSpacingAfter(6);
+  
+  // 3. บทวิเคราะห์ย่อโดย AI
+  const summaryHeading = body.appendParagraph("📝 สรุปย่อโดย AI:");
+  summaryHeading.setBold(true);
+  summaryHeading.setFontSize(11);
+  
+  const summaryParagraph = body.appendParagraph(item.summary || "ไม่มีสรุปเนื้อหา");
+  summaryParagraph.setFontSize(11);
+  summaryParagraph.setSpacingAfter(6);
+  
+  if (item.metrics && item.metrics !== "ไม่มี") {
+    const metricsParagraph = body.appendParagraph(`📊 ตัวเลข/สถิติสำคัญ: ${item.metrics}`);
+    metricsParagraph.setBold(true);
+    metricsParagraph.setFontSize(11);
+    metricsParagraph.setForegroundColor("#e65100");
+    metricsParagraph.setSpacingAfter(6);
+  }
+  
+  // 4. บทความข่าวฉบับเต็ม
+  const fullTextHeading = body.appendParagraph("📰 เนื้อหาข่าวฉบับเต็ม:");
+  fullTextHeading.setBold(true);
+  fullTextHeading.setFontSize(11);
+  
+  const fullTextParagraph = body.appendParagraph(fullText);
+  fullTextParagraph.setFontSize(11);
+  fullTextParagraph.setSpacingAfter(10);
+  
+  // 5. แทรกรูปภาพประกอบ (หากโหลดภาพสำเร็จ)
+  if (imageBlob) {
+    try {
+      body.appendParagraph("📸 ภาพประกอบข่าว:");
+      const image = body.appendImage(imageBlob);
+      // จำกัดความกว้างไม่ให้ล้นหน้าขอบกระดาษ Word/Google Doc
+      const originalWidth = image.getWidth();
+      const originalHeight = image.getHeight();
+      const maxWidth = 450;
+      if (originalWidth > maxWidth) {
+        const ratio = maxWidth / originalWidth;
+        image.setWidth(maxWidth);
+        image.setHeight(originalHeight * ratio);
+      }
+    } catch (e) {
+      Logger.log("WARNING: ไม่สามารถเขียนแทรกรูปภาพประกอบลงใน Google Doc ได้. Error: " + e.toString());
+    }
+  }
+  
+  // 6. เส้นคั่นระหว่างข่าว
+  body.appendHorizontalRule();
 }
