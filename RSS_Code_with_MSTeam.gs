@@ -482,7 +482,9 @@ ${TARGET_THEMES.map(t => `- ${t}`).join("\n")}
    - EXCLUDE general restaurant food prices, cooking recipes, general politics, or unrelated economic gossip.
 3. ALLOWED EXCEPTIONS:
    - ALLOW government-to-government (G2G) trade/grants, bilateral/multilateral official humanitarian aid (เช่น รัฐบาลไทยส่งข้าวสารช่วยเหลือผู้ประสบภัยระดับประเทศหรือประเทศเพื่อนบ้าน เช่น สปป.ลาว), or official national-level agricultural emergency relief programs.
-4. If no articles match the criteria, return an empty array [].
+4. SEMANTIC DEDUPLICATION:
+   - If multiple candidate articles discuss the exact same event, announcement, policy, or press release (even if they are from different news sources or have slightly different headlines), you MUST choose only ONE representative article (preferably the one from the most reputable or detailed source, or the primary official announcer) and completely discard the other duplicate articles. Do not output multiple records for the same news event.
+5. If no articles match the criteria, return an empty array [].
 
 # Extraction Fields Schema:
 For each relevant news article, extract and translate the fields as follows:
@@ -917,10 +919,24 @@ function fetchFeaturedImage(html, url) {
     }
     
     if (imageUrl) {
+      const lowerUrl = imageUrl.toLowerCase();
+      // เช็คเบื้องต้นจากนามสกุลไฟล์หรือพารามิเตอร์ของ URL
+      if (lowerUrl.indexOf(".webp") !== -1 || lowerUrl.indexOf("format=webp") !== -1) {
+        Logger.log("Skipping WebP image (unsupported by Google Docs): " + imageUrl);
+        return null;
+      }
+      
       Logger.log("Found og:image URL: " + imageUrl);
       const response = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
       if (response.getResponseCode() === 200) {
-        return response.getBlob();
+        const blob = response.getBlob();
+        const contentType = blob.getContentType() || "";
+        // ตรวจสอบ Content-Type จาก HTTP response header เผื่อบางไฟล์ไม่มีนามสกุลใน URL
+        if (contentType.toLowerCase().indexOf("webp") !== -1) {
+          Logger.log("Skipping WebP image based on Content-Type header: " + imageUrl);
+          return null;
+        }
+        return blob;
       }
     }
   } catch (e) {
