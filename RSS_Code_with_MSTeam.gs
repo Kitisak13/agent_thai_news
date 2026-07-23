@@ -101,21 +101,54 @@ function startRssNewsAgent() {
     return;
   }
   
-  // 1. กรองเฉพาะข่าวของ วันนี้ และ เมื่อวานนี้
-  const currentArticles = allArticles.filter(item => isTodayOrYesterday(item.pubDate));
-  Logger.log(`Articles published today/yesterday: ${currentArticles.length} items.`);
+  // 1. กรองเฉพาะข่าวที่เผยแพร่ภายใน 24 ชั่วโมงย้อนหลัง
+  const currentArticles = allArticles.filter(item => isWithinLast24Hours(item.pubDate));
+  Logger.log(`Articles published in the last 24 hours: ${currentArticles.length} items.`);
   
   if (currentArticles.length === 0) {
-    Logger.log("No articles published in the timeframe (today/yesterday).");
+    Logger.log("No articles published in the last 24 hours.");
     return;
   }
   
-  // 2. กรองหัวข้อข่าวขั้นต้นด้วย Keywords ที่เกี่ยวข้องกับข้าวและการเกษตร
-  const candidates = filterByKeywords(currentArticles);
+  // 2. ดึงประวัติเพื่อทำ Pre-Deduplication (กรองออกล่วงหน้าก่อนประมวลผลคำค้นหาและส่งให้ AI)
+  let sheet;
+  const sheetId = p.getProperty(PROP_SHEET_ID);
+  const sheetName = p.getProperty(PROP_SHEET_NAME) || "RSS";
+  try {
+    if (sheetId) {
+      sheet = SpreadsheetApp.openById(sheetId).getSheetByName(sheetName);
+    } else {
+      sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    }
+  } catch (sheetErr) {
+    Logger.log("WARNING: ไม่สามารถเปิด Google Sheet ได้สำหรับ Pre-Deduplication: " + sheetErr.toString());
+  }
+
+  let uniqueArticles = currentArticles;
+  if (sheet) {
+    const { existingUrls, existingHeadlines } = getExistingNewsKeys(sheet);
+    uniqueArticles = currentArticles.filter(item => {
+      const urlKey = (item.link || "").toString().trim().toLowerCase();
+      const headlineKey = (item.title || "").toString().trim().toLowerCase();
+      
+      if (urlKey && existingUrls.has(urlKey)) return false;
+      if (headlineKey && existingHeadlines.has(headlineKey)) return false;
+      return true;
+    });
+    Logger.log(`Articles after Pre-Deduplication (unprocessed news only): ${uniqueArticles.length} items.`);
+  }
+
+  if (uniqueArticles.length === 0) {
+    Logger.log("All articles in this run are already processed in the history.");
+    return;
+  }
+  
+  // 3. กรองหัวข้อข่าวขั้นต้นด้วย Keywords ที่เกี่ยวข้องกับข้าวและการเกษตร
+  const candidates = filterByKeywords(uniqueArticles);
   Logger.log(`Candidate articles after keyword filtering: ${candidates.length} items.`);
   
   if (candidates.length === 0) {
-    Logger.log("No agricultural or rice crop candidate news found.");
+    Logger.log("No new agricultural or rice crop candidate news found after keyword filtering.");
     return;
   }
   
@@ -406,17 +439,13 @@ function parseFeedDate(dateStr) {
   return new Date();
 }
 
-// กรองเฉพาะข่าวที่เผยแพร่วันนี้และเมื่อวานนี้
-function isTodayOrYesterday(date) {
-  const today = new Date();
-  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-  
-  const formattedToday = Utilities.formatDate(today, "Asia/Bangkok", "yyyy-MM-dd");
-  const formattedYesterday = Utilities.formatDate(yesterday, "Asia/Bangkok", "yyyy-MM-dd");
-  
-  const itemDate = Utilities.formatDate(date, "Asia/Bangkok", "yyyy-MM-dd");
-  
-  return itemDate === formattedToday || itemDate === formattedYesterday;
+// กรองเฉพาะข่าวที่เผยแพร่ภายใน 24 ชั่วโมงย้อนหลังจากเวลาปัจจุบัน
+function isWithinLast24Hours(date) {
+  if (!date) return false;
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffHours = diffMs / (1000 * 60 * 60);
+  return diffHours >= 0 && diffHours <= 24;
 }
 
 // ตัวกรองคำค้นหา (Keyword Filter) เบื้องต้นเพื่อประหยัดโควตาการประมวลผลของ AI โดยใช้คำค้นจากอาเรย์ FILTER_KEYWORDS ด้านบน
@@ -562,23 +591,7 @@ function saveJsonToSheet(jsonArray) {
   }
   
   // 1. ดึงข้อมูลประวัติในชีตมาตรวจสอบการบันทึกซ้ำ
-  const lastRow = sheet.getLastRow();
-  const existingUrls = new Set();
-  const existingHeadlines = new Set();
-  
-  if (lastRow > 1) { // มากกว่า 1 เพราะแถวที่ 1 เป็น Header
-    const data = sheet.getRange(1, 1, lastRow, 9).getValues();
-    for (let i = 1; i < data.length; i++) { // เริ่มวนแถวที่ 2 (i=1)
-      const headline = data[i][4]; // คอลัมน์ E (Headline)
-      const url = data[i][8];      // คอลัมน์ I (URL)
-      if (url) {
-        existingUrls.add(url.toString().trim().toLowerCase());
-      }
-      if (headline) {
-        existingHeadlines.add(headline.toString().trim().toLowerCase());
-      }
-    }
-  }
+  const { existingUrls, existingHeadlines } = getExistingNewsKeys(sheet);
   
   const timestamp = new Date();
   const newItems = [];
@@ -622,6 +635,28 @@ function saveJsonToSheet(jsonArray) {
   
   Logger.log(`Saved ${newItems.length} new news items to Google Sheet.`);
   return newItems;
+}
+
+// ดึงข้อมูลข่าวในชีตที่เคยบันทึกไว้ เพื่อใช้ตรวจสอบความซ้ำซ้อนล่วงหน้า (Pre-Deduplication)
+function getExistingNewsKeys(sheet) {
+  const lastRow = sheet.getLastRow();
+  const existingUrls = new Set();
+  const existingHeadlines = new Set();
+  
+  if (lastRow > 1) { // แถวแรกเป็น Header
+    const data = sheet.getRange(1, 1, lastRow, 9).getValues();
+    for (let i = 1; i < data.length; i++) {
+      const headline = data[i][4]; // คอลัมน์ E (Headline)
+      const url = data[i][8];      // คอลัมน์ I (URL)
+      if (url) {
+        existingUrls.add(url.toString().trim().toLowerCase());
+      }
+      if (headline) {
+        existingHeadlines.add(headline.toString().trim().toLowerCase());
+      }
+    }
+  }
+  return { existingUrls, existingHeadlines };
 }
 
 // ==========================================
