@@ -125,14 +125,15 @@ function startRssNewsAgent() {
   }
 
   let uniqueArticles = currentArticles;
+  let existingKeys = null;
   if (sheet) {
-    const { existingUrls, existingHeadlines } = getExistingNewsKeys(sheet);
+    existingKeys = getExistingNewsKeys(sheet);
     uniqueArticles = currentArticles.filter(item => {
       const urlKey = (item.link || "").toString().trim().toLowerCase();
       const headlineKey = (item.title || "").toString().trim().toLowerCase();
       
-      if (urlKey && existingUrls.has(urlKey)) return false;
-      if (headlineKey && existingHeadlines.has(headlineKey)) return false;
+      if (urlKey && existingKeys.existingUrls.has(urlKey)) return false;
+      if (headlineKey && existingKeys.existingHeadlines.has(headlineKey)) return false;
       return true;
     });
     Logger.log(`Articles after Pre-Deduplication (unprocessed news only): ${uniqueArticles.length} items.`);
@@ -152,7 +153,7 @@ function startRssNewsAgent() {
     return;
   }
   
-  // 3. ส่งข่าวที่ผ่านการกรองขั้นต้นไปให้ Gemini เพื่อวิเคราะห์และแปลงเป็น JSON ภาษาไทย
+  // 4. ส่งข่าวที่ผ่านการกรองขั้นต้นไปให้ Gemini เพื่อวิเคราะห์และแปลงเป็น JSON ภาษาไทย
   Logger.log("Sending candidates to Gemini for final classification and extraction...");
   try {
     const jsonArray = parseCandidatesWithGemini(candidates, apiKey);
@@ -176,22 +177,28 @@ function startRssNewsAgent() {
       });
     }
     
-    // 4. บันทึกผลลัพธ์ลง Google Sheet
-    const newItems = saveJsonToSheet(jsonArray);
+    // 5. บันทึกผลลัพธ์ลง Google Sheet (ส่งผ่าน sheet และ keys เพื่อลด Overhead)
+    const newItems = saveJsonToSheet(jsonArray, sheet, existingKeys);
     
-    // 5. หากมีข่าวใหม่ ให้ทำเอกสารรายงานและส่งการแจ้งเตือน
+    // 6. หากมีข่าวใหม่ ให้ทำเอกสารรายงานและส่งการแจ้งเตือน
     if (newItems && newItems.length > 0) {
       let docUrl = "";
       try {
         const folderId = p.getProperty(PROP_DRIVE_FOLDER);
         const doc = getOrCreateDailyDoc(folderId);
         
-        // วนลูปสกัดเนื้อหาและภาพเพื่อบันทึกลง Doc
+        // วนลูปสกัดเนื้อหาและภาพเพื่อบันทึกลง Doc (โหลด HTML เพียงรอบเดียวต่อข่าว)
         newItems.forEach(item => {
           if (item.url) {
             Logger.log(`Processing Google Doc content for: ${item.headline}`);
-            const fullText = fetchFullContentWithGemini(item.url, apiKey);
-            const imageBlob = fetchFeaturedImage(item.url);
+            let htmlContent = null;
+            try {
+              htmlContent = fetchXml(item.url);
+            } catch (fetchErr) {
+              Logger.log(`WARNING: ไม่สามารถโหลด HTML ข่าวต้นฉบับได้สำหรับ: ${item.headline}. Error: ${fetchErr.toString()}`);
+            }
+            const fullText = fetchFullContentWithGemini(htmlContent || item.url, apiKey, item.url);
+            const imageBlob = fetchFeaturedImage(htmlContent, item.url);
             appendNewsToDoc(doc, item, fullText, imageBlob);
           }
         });
@@ -412,7 +419,7 @@ function parseNewsSitemap(xmlString, sourceName) {
 
 // พาร์สฟอร์แมตวันที่จากข้อความของ RSS Feed
 function parseFeedDate(dateStr) {
-  if (!dateStr) return new Date();
+  if (!dateStr) return null;
   
   // ทดลองแปลงตรงๆ
   let date = new Date(dateStr);
@@ -436,7 +443,7 @@ function parseFeedDate(dateStr) {
     return new Date(utcTime - 7 * 60 * 60 * 1000);
   }
   
-  return new Date();
+  return null;
 }
 
 // กรองเฉพาะข่าวที่เผยแพร่ภายใน 24 ชั่วโมงย้อนหลังจากเวลาปัจจุบัน
@@ -552,17 +559,19 @@ function parseCandidatesWithGemini(candidates, apiKey) {
 // ==========================================
 // 4. บันทึกผลลัพธ์ลงในชีตชื่อ "RSS" และตรวจสอบข่าวซ้ำ
 // ==========================================
-function saveJsonToSheet(jsonArray) {
+function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
   const p = PropertiesService.getScriptProperties();
   const sheetId = p.getProperty(PROP_SHEET_ID);
   // ตั้งค่าให้ชีตเริ่มต้นเป็นชื่อ "RSS" ตามต้องการ
   const sheetName = p.getProperty(PROP_SHEET_NAME) || "RSS";
   
-  let sheet;
-  if (sheetId) {
-    sheet = SpreadsheetApp.openById(sheetId).getSheetByName(sheetName);
-  } else {
-    sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  let sheet = sheetObj;
+  if (!sheet) {
+    if (sheetId) {
+      sheet = SpreadsheetApp.openById(sheetId).getSheetByName(sheetName);
+    } else {
+      sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    }
   }
   
   if (!sheet) {
@@ -591,7 +600,14 @@ function saveJsonToSheet(jsonArray) {
   }
   
   // 1. ดึงข้อมูลประวัติในชีตมาตรวจสอบการบันทึกซ้ำ
-  const { existingUrls, existingHeadlines } = getExistingNewsKeys(sheet);
+  let existingUrls = existingKeys ? existingKeys.existingUrls : null;
+  let existingHeadlines = existingKeys ? existingKeys.existingHeadlines : null;
+  
+  if (!existingUrls || !existingHeadlines) {
+    const keys = getExistingNewsKeys(sheet);
+    existingUrls = keys.existingUrls;
+    existingHeadlines = keys.existingHeadlines;
+  }
   
   const timestamp = new Date();
   const newItems = [];
@@ -880,19 +896,28 @@ function getOrCreateDailyDoc(folderId) {
   }
 }
 
-// โหลดโค้ด HTML ของหน้าข่าวเพื่อสกัดภาพหน้าปก / อินโฟกราฟิกหลักผ่าน og:image tag
-function fetchFeaturedImage(url) {
+// สกัดภาพหน้าปก / อินโฟกราฟิกหลักผ่าน og:image tag โดยรับ HTML ดิบโดยตรงเพื่อลด Overhead
+function fetchFeaturedImage(html, url) {
   try {
-    const html = fetchXml(url);
-    if (!html) return null;
+    let htmlContent = html;
+    if (!htmlContent && url) {
+      htmlContent = fetchXml(url);
+    }
+    if (!htmlContent) return null;
     
-    // ใช้ Regex ค้นหาแท็ก og:image ใน HTML ของบทความ
-    const regex = /meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i;
-    const match = html.match(regex);
-    if (match && match[1]) {
-      const imageUrl = match[1].trim();
+    // ใช้ Regex ที่ยืดหยุ่นเพื่อค้นหาแท็ก og:image ใน HTML ของบทความ (รองรับทั้งแบบ property ขึ้นก่อน หรือ content ขึ้นก่อน)
+    let imageUrl = null;
+    const match1 = htmlContent.match(/meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+    const match2 = htmlContent.match(/meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i);
+    
+    if (match1 && match1[1]) {
+      imageUrl = match1[1].trim();
+    } else if (match2 && match2[1]) {
+      imageUrl = match2[1].trim();
+    }
+    
+    if (imageUrl) {
       Logger.log("Found og:image URL: " + imageUrl);
-      
       const response = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
       if (response.getResponseCode() === 200) {
         return response.getBlob();
@@ -929,10 +954,13 @@ function cleanHtmlForAI(html) {
   return text;
 }
 
-// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini ทำการสกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์
-function fetchFullContentWithGemini(url, apiKey) {
+// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini ทำการสกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์ (รองรับการรับ HTML ดิบโดยตรงเพื่อเลี่ยงโหลดซ้ำ)
+function fetchFullContentWithGemini(htmlOrUrl, apiKey, urlForLog) {
   try {
-    const rawHtml = fetchXml(url);
+    let rawHtml = htmlOrUrl;
+    if (htmlOrUrl && htmlOrUrl.toString().trim().indexOf("http") === 0) {
+      rawHtml = fetchXml(htmlOrUrl);
+    }
     const cleanedText = cleanHtmlForAI(rawHtml);
     
     if (!cleanedText) return "ไม่สามารถดึงข้อมูลเนื้อหาหลักของข่าวได้";
@@ -982,7 +1010,7 @@ Rules:
       return responseJson.candidates[0].content.parts[0].text.trim();
     }
   } catch (e) {
-    Logger.log("ERROR extracting full content with Gemini: " + e.toString());
+    Logger.log("ERROR extracting full content with Gemini for " + (urlForLog || "unknown URL") + ": " + e.toString());
   }
   return "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้";
 }
