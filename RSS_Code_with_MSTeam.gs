@@ -954,7 +954,7 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
   // 1. หัวข้อข่าวหลัก (Heading 2)
   const headingText = `${item.source || "ไม่ระบุแหล่งข่าว"} - ${item.headline || "ไม่มีหัวข้อข่าว"}`;
   const heading = body.appendParagraph(headingText);
-  heading.setHeading(DocumentApp.ParagraphHeading.HEADING_2);
+  heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
   heading.setBold(true);
   heading.setSpacingBefore(12);
   
