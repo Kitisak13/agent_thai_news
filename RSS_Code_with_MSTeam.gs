@@ -66,8 +66,8 @@ function startRssNewsAgent() {
     { name: "โพสต์ทูเดย์", url: "https://api.posttoday.com/sitemap/latest", type: "news_sitemap" },
     { name: "ฐานเศรษฐกิจ", url: "https://api.thansettakij.com/sitemap/latest", type: "news_sitemap" },
     { name: "กรุงเทพธุรกิจ", url: "https://api.bangkokbiznews.com/sitemap/latest", type: "news_sitemap" },
-    { name: "มติชน", url: "https://matichon.co.th/sitemap-news.xml", type: "news_sitemap" },
-    { name: "ประชาชาติธุรกิจ", url: "https://prachachat.net/sitemap-news.xml", type: "news_sitemap" }
+    { name: "มติชน", url: "https://www.matichon.co.th/sitemap-news.xml", type: "news_sitemap" },
+    { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/feed", type: "rss" }
   ];
   
   let allArticles = [];

@@ -13,8 +13,8 @@ An automated news intelligence system built on Google Apps Script (GAS) that pul
   * Posttoday (News Sitemap)
   * Thansettakij (News Sitemap)
   * Bangkokbiznews (News Sitemap)
-  * Matichon (News Sitemap)
-  * Prachachat Turakij (News Sitemap)
+  * Matichon (News Sitemap - resolved with ScraperAPI)
+  * Prachachat Turakij (RSS Feed - resolved with ScraperAPI)
 * **Customizable Keyword Pre-filtering:** Automatically filters news items inside Google Apps Script before calling the AI model to minimize API token usage and cost.
 * **Intelligent AI Analysis (Gemini):** Classifies news categories, translates headlines, summarizes key facts, extracts metrics (prices, quantities, budgets), and evaluates export impact level (`High`, `Medium`, `Low`).
 * **Anti-Duplicate Sheet Engine:** Compares incoming news links and headlines with historical data in the Google Sheet to prevent recording duplicates.
