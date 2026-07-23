@@ -836,6 +836,7 @@ function getOrCreateDailyDoc(folderId) {
     const titleParagraph = body.appendParagraph("รายงานข่าวประจำวัน " + dateString);
     titleParagraph.setHeading(DocumentApp.ParagraphHeading.TITLE);
     titleParagraph.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    styleParagraph(titleParagraph, "Cordia New", 24, "#000000", true, false);
     
     body.appendHorizontalRule();
     
@@ -959,47 +960,43 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
   const headingText = `${item.source || "ไม่ระบุแหล่งข่าว"} - ${item.headline || "ไม่มีหัวข้อข่าว"}`;
   const heading = body.appendParagraph(headingText);
   heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
-  heading.setBold(true);
+  styleParagraph(heading, "Cordia New", 16, "#000000", true, false);
   heading.setSpacingBefore(12);
   
   // 2. ข้อมูลสถิติของข่าว (Meta data)
   const metaText = `📅 วันที่เผยแพร่: ${item.publish_date || "ไม่ระบุ"} | 📁 หมวดหมู่: ${item.category || "ราคาและการค้า"} | 🎯 ผลกระทบ: ${item.impact || "Low"}\n🔗 ลิงก์ข่าวต้นฉบับ: ${item.url || "ไม่มี"}`;
   const metaParagraph = body.appendParagraph(metaText);
-  metaParagraph.setItalic(true);
-  metaParagraph.setFontSize(10);
-  metaParagraph.setForegroundColor("#666666");
+  styleParagraph(metaParagraph, "Cordia New", 14, "#000000", false, false);
   metaParagraph.setSpacingAfter(6);
   
   // 3. บทวิเคราะห์ย่อโดย AI
   const summaryHeading = body.appendParagraph("📝 สรุปย่อโดย AI:");
-  summaryHeading.setBold(true);
-  summaryHeading.setFontSize(11);
+  styleParagraph(summaryHeading, "Cordia New", 14, "#000000", true, false);
   
   const summaryParagraph = body.appendParagraph(item.summary || "ไม่มีสรุปเนื้อหา");
-  summaryParagraph.setFontSize(11);
+  styleParagraph(summaryParagraph, "Cordia New", 14, "#000000", false, false);
   summaryParagraph.setSpacingAfter(6);
   
   if (item.metrics && item.metrics !== "ไม่มี") {
     const metricsParagraph = body.appendParagraph(`📊 ตัวเลข/สถิติสำคัญ: ${item.metrics}`);
-    metricsParagraph.setBold(true);
-    metricsParagraph.setFontSize(11);
-    metricsParagraph.setForegroundColor("#e65100");
+    styleParagraph(metricsParagraph, "Cordia New", 14, "#000000", true, false);
     metricsParagraph.setSpacingAfter(6);
   }
   
   // 4. บทความข่าวฉบับเต็ม
   const fullTextHeading = body.appendParagraph("📰 เนื้อหาข่าวฉบับเต็ม:");
-  fullTextHeading.setBold(true);
-  fullTextHeading.setFontSize(11);
+  styleParagraph(fullTextHeading, "Cordia New", 14, "#000000", true, false);
   
   const fullTextParagraph = body.appendParagraph(fullText);
-  fullTextParagraph.setFontSize(11);
+  styleParagraph(fullTextParagraph, "Cordia New", 14, "#000000", false, false);
   fullTextParagraph.setSpacingAfter(10);
   
   // 5. แทรกรูปภาพประกอบ (หากโหลดภาพสำเร็จ)
   if (imageBlob) {
     try {
-      body.appendParagraph("📸 ภาพประกอบข่าว:");
+      const imgHeading = body.appendParagraph("📸 ภาพประกอบข่าว:");
+      styleParagraph(imgHeading, "Cordia New", 14, "#000000", true, false);
+      
       const image = body.appendImage(imageBlob);
       // จำกัดความกว้างไม่ให้ล้นหน้าขอบกระดาษ Word/Google Doc
       const originalWidth = image.getWidth();
@@ -1017,4 +1014,14 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
   
   // 6. เส้นคั่นระหว่างข่าว
   body.appendHorizontalRule();
+}
+
+// ฟังก์ชันเสริมสำหรับกำหนดรูปแบบข้อความ (Font, Size, Color, Weight, Style) ป้องกันบั๊กการสืบทอดสีและรูปแบบอักษร
+function styleParagraph(p, fontFamily, fontSize, color, isBold, isItalic) {
+  p.setFontFamily(fontFamily || "Cordia New");
+  p.setFontSize(fontSize || 14);
+  p.setForegroundColor(color || "#000000");
+  p.setBold(isBold === true);
+  p.setItalic(isItalic === true);
+  return p;
 }
