@@ -687,7 +687,7 @@ function sendTeamsNotification(newItems) {
     // เพิ่มข้อมูลข่าวแต่ละข่าวลงใน body
     cardBody.push({
       "type": "TextBlock",
-      "text": `${index + 1}. **${item.headline || "ไม่มีหัวข้อข่าว"}**`,
+      "text": `**${index + 1}. ${item.headline || "ไม่มีหัวข้อข่าว"}**`,
       "wrap": true,
       "weight": "Bolder",
       "spacing": "Medium"
