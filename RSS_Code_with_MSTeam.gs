@@ -67,8 +67,8 @@ function startRssNewsAgent() {
     { name: "โพสต์ทูเดย์", url: "https://api.posttoday.com/sitemap/latest", type: "news_sitemap" },
     { name: "ฐานเศรษฐกิจ", url: "https://api.thansettakij.com/sitemap/latest", type: "news_sitemap" },
     { name: "กรุงเทพธุรกิจ", url: "https://api.bangkokbiznews.com/sitemap/latest", type: "news_sitemap" },
-    { name: "มติชน", url: "https://www.matichon.co.th/sitemap-news.xml", type: "news_sitemap" },
-    { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/feed", type: "rss" }
+    { name: "มติชน", url: "https://www.matichon.co.th/economy/feed", type: "rss2json" },
+    { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/economy/feed", type: "rss2json" }
   ];
   
   let allArticles = [];
@@ -77,15 +77,19 @@ function startRssNewsAgent() {
   feeds.forEach(feed => {
     try {
       Logger.log(`Fetching feed: ${feed.name} (${feed.url})...`);
-      const xmlString = fetchXml(feed.url);
-      
       let parsed = [];
-      if (feed.type === "rss") {
-        parsed = parseRssFeed(xmlString, feed.name);
-      } else if (feed.type === "thairath_sitemap") {
-        parsed = parseThairathSitemap(xmlString);
-      } else if (feed.type === "news_sitemap") {
-        parsed = parseNewsSitemap(xmlString, feed.name);
+      
+      if (feed.type === "rss2json") {
+        parsed = fetchFeedViaRss2Json(feed.url, feed.name);
+      } else {
+        const xmlString = fetchXml(feed.url);
+        if (feed.type === "rss") {
+          parsed = parseRssFeed(xmlString, feed.name);
+        } else if (feed.type === "thairath_sitemap") {
+          parsed = parseThairathSitemap(xmlString);
+        } else if (feed.type === "news_sitemap") {
+          parsed = parseNewsSitemap(xmlString, feed.name);
+        }
       }
       
       Logger.log(`Successfully parsed ${parsed.length} items from ${feed.name}`);
@@ -275,8 +279,9 @@ function fetchXml(url) {
   
   // 3. ใช้ ScraperAPI เป็นทางเลือกสุดท้าย (ไม้ตายสุดท้าย)
   if (scraperApiKey) {
-    // แนบพารามิเตอร์ max_cost เพื่อควบคุมไม่ให้ค่าใช้จ่ายเกิน 5 เครดิตต่อครั้ง (ป้องกันโหมดหรู/แพงที่ระบบคำนวณให้อัตโนมัติ)
-    const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=5";
+    // แนบพารามิเตอร์ max_cost=25 เพื่อควบคุมไม่ให้ค่าใช้จ่ายเกิน 25 เครดิตต่อครั้ง (ป้องกันโหมดหรู/แพงเกินไป)
+    // แต่ยอมรับราคา Bypass Cloudflare หน้าข่าวหลัก (ปกติประมาณ 10-15 เครดิต) ซึ่งเกิดน้อยครั้งมากต่อวัน
+    const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=25";
     Logger.log("Fetching via ScraperAPI Proxy (Final Fallback) for: " + url);
     
     const response = UrlFetchApp.fetch(scraperUrl, {
@@ -450,6 +455,45 @@ function parseNewsSitemap(xmlString, sourceName) {
     }
   });
   return items;
+}
+
+// ดึงข้อมูลฟีดข่าวผ่าน API บริการฟรีของ rss2json เพื่อเลี่ยงการติดบล็อก Cloudflare และประหยัดเครดิต ScraperAPI
+function fetchFeedViaRss2Json(feedUrl, sourceName) {
+  try {
+    const apiUrl = "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(feedUrl);
+    const response = UrlFetchApp.fetch(apiUrl, {
+      method: "get",
+      muteHttpExceptions: true
+    });
+    
+    if (response.getResponseCode() === 200) {
+      const json = JSON.parse(response.getContentText());
+      if (json.status === "ok" && json.items) {
+        Logger.log(`Successfully fetched and parsed feed via rss2json for ${sourceName}`);
+        return json.items.map(item => {
+          let pubDate = null;
+          if (item.pubDate) {
+            // ฟอร์แมตของ rss2json มักเป็น "YYYY-MM-DD HH:mm:ss" ในหน่วย UTC
+            // แปลงสัญลักษณ์ '-' เป็น '/' เพื่อหลีกเลี่ยงข้อผิดพลาดในการพาร์สของ V8 engine บางเครื่อง
+            const normalizedDateStr = item.pubDate.replace(/-/g, "/");
+            pubDate = new Date(normalizedDateStr + " UTC");
+          }
+          return {
+            title: (item.title || "").trim(),
+            link: (item.link || "").trim(),
+            description: (item.description || item.content || "").replace(/<[^>]*>/g, "").trim(),
+            pubDate: pubDate,
+            source: sourceName
+          };
+        });
+      }
+    }
+    throw new Error(`rss2json API returned HTTP status ${response.getResponseCode()}`);
+  } catch (e) {
+    Logger.log(`ERROR in fetchFeedViaRss2Json for ${sourceName}: ${e.toString()}`);
+    // ส่งกลับอาร์เรย์ว่างเพื่อให้ระบบรันต่อได้แบบ Graceful
+    return [];
+  }
 }
 
 // พาร์สฟอร์แมตวันที่จากข้อความของ RSS Feed
