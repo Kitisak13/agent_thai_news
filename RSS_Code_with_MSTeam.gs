@@ -8,6 +8,7 @@ const PROP_MODEL_NAME = "GEMINI_MODEL_NAME"; // ชื่อโมเดลส�
 const PROP_EMAIL_RECIPIENT = "NOTIFICATION_EMAIL";
 const PROP_TEAMS_WEBHOOK = "TEAMS_WEBHOOK_URL"; // Webhook URL สำหรับ MS Teams
 const PROP_SCRAPER_KEY = "SCRAPER_API_KEY";     // API Key สำหรับ ScraperAPI (มติชน / ประชาชาติ)
+const PROP_SCRAPER_KEY_BACKUP = "SCRAPER_API_KEY_BACKUP"; // API Key สำรองสำหรับ ScraperAPI (กรณีคีย์หลักเครดิตเต็ม)
 const PROP_DRIVE_FOLDER = "DRIVE_FOLDER_ID";    // Folder ID ของ Google Drive ที่จะเก็บเล่มรายงาน Google Doc
 
 // ==========================================================================
@@ -51,13 +52,26 @@ const TARGET_THEMES = [
 // ==========================================
 // 1. ฟังก์ชันหลักสำหรับเริ่มทำงานดึงข่าวผ่าน RSS & Sitemap
 // ==========================================
-function startRssNewsAgent() {
+function startRssNewsAgent(e) {
   const p = PropertiesService.getScriptProperties();
   const apiKey = p.getProperty(PROP_API_KEY);
   
   if (!apiKey) {
     Logger.log("ERROR: กรุณาตั้งค่า GEMINI_API_KEY ใน Script Properties ก่อน");
     return;
+  }
+  
+  // ตรวจเช็คเวลารัน (Allowed Hours Guard Clause) เฉพาะเมื่อรันผ่านทริกเกอร์อัตโนมัติเท่านั้น
+  // เพื่อเปิดทางให้ยังสามารถกดปุ่ม Run เพื่อทดสอบแมนนวลด้วยตนเองได้ทุกเมื่อ
+  if (e) {
+    const now = new Date();
+    const currentHour = parseInt(Utilities.formatDate(now, "Asia/Bangkok", "H"), 10);
+    const allowedHours = [6, 9, 12, 15, 18];
+    
+    if (!allowedHours.includes(currentHour)) {
+      Logger.log(`Skipping execution: Current hour (${currentHour}) is not in the allowed schedule [6, 9, 12, 15, 18].`);
+      return;
+    }
   }
   
   const feeds = [
@@ -67,7 +81,6 @@ function startRssNewsAgent() {
     { name: "โพสต์ทูเดย์", url: "https://api.posttoday.com/sitemap/latest", type: "news_sitemap" },
     { name: "ฐานเศรษฐกิจ", url: "https://api.thansettakij.com/sitemap/latest", type: "news_sitemap" },
     { name: "กรุงเทพธุรกิจ", url: "https://api.bangkokbiznews.com/sitemap/latest", type: "news_sitemap" },
-    { name: "มติชน", url: "https://www.matichon.co.th/economy/feed", type: "rss2json" },
     { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/economy/feed", type: "rss2json" }
   ];
   
@@ -277,25 +290,50 @@ function fetchXml(url) {
     Logger.log(`AllOrigins proxy failed for ${url}: ${e.toString()}. Falling back to ScraperAPI...`);
   }
   
-  // 3. ใช้ ScraperAPI เป็นทางเลือกสุดท้าย (ไม้ตายสุดท้าย)
+  // 3. ใช้ ScraperAPI เป็นทางเลือกสุดท้าย (คีย์หลัก)
   if (scraperApiKey) {
-    // แนบพารามิเตอร์ max_cost=25 เพื่อควบคุมไม่ให้ค่าใช้จ่ายเกิน 25 เครดิตต่อครั้ง (ป้องกันโหมดหรู/แพงเกินไป)
-    // แต่ยอมรับราคา Bypass Cloudflare หน้าข่าวหลัก (ปกติประมาณ 10-15 เครดิต) ซึ่งเกิดน้อยครั้งมากต่อวัน
-    const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=25";
-    Logger.log("Fetching via ScraperAPI Proxy (Final Fallback) for: " + url);
-    
-    const response = UrlFetchApp.fetch(scraperUrl, {
-      method: "get",
-      muteHttpExceptions: true
-    });
-    const code = response.getResponseCode();
-    if (code === 200) {
-      return sanitizeXmlEntities(response.getContentText());
+    try {
+      // แนบพารามิเตอร์ max_cost=25 เพื่อควบคุมไม่ให้ค่าใช้จ่ายเกิน 25 เครดิตต่อครั้ง (ป้องกันโหมดหรู/แพงเกินไป)
+      // แต่ยอมรับราคา Bypass Cloudflare หน้าข่าวหลัก (ปกติประมาณ 10-15 เครดิต) ซึ่งเกิดน้อยครั้งมากต่อวัน
+      const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=25";
+      Logger.log("Fetching via Primary ScraperAPI Proxy for: " + url);
+      
+      const response = UrlFetchApp.fetch(scraperUrl, {
+        method: "get",
+        muteHttpExceptions: true
+      });
+      const code = response.getResponseCode();
+      if (code === 200) {
+        return sanitizeXmlEntities(response.getContentText());
+      }
+      Logger.log(`Primary ScraperAPI returned HTTP code ${code} for ${url}. Trying backup key...`);
+    } catch (e) {
+      Logger.log(`Primary ScraperAPI request failed: ${e.toString()}. Trying backup key...`);
     }
-    throw new Error("HTTP Error " + code + " from ScraperAPI fallback for " + url);
   }
   
-  throw new Error("Failed to fetch content for " + url + " (No scraper API key available for fallback)");
+  // 4. ลองใช้ ScraperAPI คีย์สำรอง (Backup Key) หากมีตั้งค่าไว้
+  const backupApiKey = p.getProperty(PROP_SCRAPER_KEY_BACKUP);
+  if (backupApiKey) {
+    try {
+      const scraperUrl = "http://api.scraperapi.com?api_key=" + backupApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=25";
+      Logger.log("Fetching via Backup ScraperAPI Proxy for: " + url);
+      
+      const response = UrlFetchApp.fetch(scraperUrl, {
+        method: "get",
+        muteHttpExceptions: true
+      });
+      const code = response.getResponseCode();
+      if (code === 200) {
+        return sanitizeXmlEntities(response.getContentText());
+      }
+      throw new Error(`Backup ScraperAPI returned HTTP code ${code}`);
+    } catch (e) {
+      throw new Error(`Both Primary and Backup ScraperAPI failed for ${url}. Last error: ${e.toString()}`);
+    }
+  }
+  
+  throw new Error("Failed to fetch content for " + url + " (No working scraper API key available)");
 }
 
 // ฟังก์ชันสำหรับแทนที่ HTML Entity ที่ไม่ใช่ XML Entity มาตรฐาน เพื่อไม่ให้โครงสร้าง XML พังระหว่างการพาร์ส
