@@ -232,30 +232,65 @@ function fetchXml(url) {
   const p = PropertiesService.getScriptProperties();
   const scraperApiKey = p.getProperty(PROP_SCRAPER_KEY);
   
-  // ตรวจจับว่าต้องใช้ Proxy หรือไม่ (เฉพาะมติชนและประชาชาติธุรกิจที่ติด 403)
+  // ตรวจจับว่าต้องใช้ Proxy หรือไม่ (เฉพาะมติชนและประชาชาติธุรกิจที่มักติดบล็อก 403)
   const isBlockedSite = url.includes("matichon.co.th") || url.includes("prachachat.net");
   
-  let finalUrl = url;
-  if (isBlockedSite && scraperApiKey) {
-    finalUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url);
-    Logger.log("Fetching via ScraperAPI Proxy for: " + url);
-  }
-  
-  const options = {
-    method: "get",
-    muteHttpExceptions: true,
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "text/xml, application/xml, application/xhtml+xml, text/html"
+  // 1. ลองดึงตรงๆ ก่อน (หากไม่ใช่เว็บที่มีประวัติบล็อก หรือไม่มี ScraperAPI key)
+  if (!isBlockedSite) {
+    try {
+      const response = UrlFetchApp.fetch(url, {
+        method: "get",
+        muteHttpExceptions: true,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/xml, application/xml, application/xhtml+xml, text/html"
+        }
+      });
+      if (response.getResponseCode() === 200) {
+        return sanitizeXmlEntities(response.getContentText());
+      }
+      Logger.log(`Direct fetch for ${url} returned status ${response.getResponseCode()}. Trying proxy...`);
+    } catch (e) {
+      Logger.log(`Direct fetch failed for ${url}: ${e.toString()}. Trying proxy...`);
     }
-  };
-  
-  const response = UrlFetchApp.fetch(finalUrl, options);
-  const code = response.getResponseCode();
-  if (code !== 200) {
-    throw new Error("HTTP Error " + code + " when fetching via " + (finalUrl === url ? "Direct" : "Proxy") + " for " + url);
   }
-  return sanitizeXmlEntities(response.getContentText());
+  
+  // 2. ลองผ่าน AllOrigins (Free Web Proxy) - ช่วยหลบเลี่ยงการบล็อก IP ของ Google โดยไม่เสียเครดิต ScraperAPI
+  try {
+    const proxyUrl = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+    const response = UrlFetchApp.fetch(proxyUrl, {
+      method: "get",
+      muteHttpExceptions: true
+    });
+    if (response.getResponseCode() === 200) {
+      const json = JSON.parse(response.getContentText());
+      if (json.contents) {
+        Logger.log(`Successfully fetched via AllOrigins Free Proxy for: ${url}`);
+        return sanitizeXmlEntities(json.contents);
+      }
+    }
+  } catch (e) {
+    Logger.log(`AllOrigins proxy failed for ${url}: ${e.toString()}. Falling back to ScraperAPI...`);
+  }
+  
+  // 3. ใช้ ScraperAPI เป็นทางเลือกสุดท้าย (ไม้ตายสุดท้าย)
+  if (scraperApiKey) {
+    // แนบพารามิเตอร์ max_cost เพื่อควบคุมไม่ให้ค่าใช้จ่ายเกิน 5 เครดิตต่อครั้ง (ป้องกันโหมดหรู/แพงที่ระบบคำนวณให้อัตโนมัติ)
+    const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=5";
+    Logger.log("Fetching via ScraperAPI Proxy (Final Fallback) for: " + url);
+    
+    const response = UrlFetchApp.fetch(scraperUrl, {
+      method: "get",
+      muteHttpExceptions: true
+    });
+    const code = response.getResponseCode();
+    if (code === 200) {
+      return sanitizeXmlEntities(response.getContentText());
+    }
+    throw new Error("HTTP Error " + code + " from ScraperAPI fallback for " + url);
+  }
+  
+  throw new Error("Failed to fetch content for " + url + " (No scraper API key available for fallback)");
 }
 
 // ฟังก์ชันสำหรับแทนที่ HTML Entity ที่ไม่ใช่ XML Entity มาตรฐาน เพื่อไม่ให้โครงสร้าง XML พังระหว่างการพาร์ส
