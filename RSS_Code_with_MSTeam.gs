@@ -76,7 +76,7 @@ function startRssNewsAgent(e) {
   
   const feeds = [
     { name: "ผู้จัดการออนไลน์", url: "https://mgronline.com/store/rss/index.xml", type: "rss" },
-    { name: "แนวหน้า", url: "https://www.naewna.com/rss.php", type: "rss" },
+    { name: "แนวหน้า", url: "https://www.naewna.com/n/feed/", type: "rss" },
     { name: "ไทยรัฐ", url: "https://www.thairath.co.th/sitemap-daily.xml", type: "thairath_sitemap" },
     { name: "โพสต์ทูเดย์", url: "https://api.posttoday.com/sitemap/latest", type: "news_sitemap" },
     { name: "ฐานเศรษฐกิจ", url: "https://api.thansettakij.com/sitemap/latest", type: "news_sitemap" },
@@ -374,6 +374,10 @@ function sanitizeXmlEntities(xmlString) {
 
 // พาร์สข้อมูล RSS Feed
 function parseRssFeed(xmlString, sourceName) {
+  if (!xmlString || !xmlString.trim()) {
+    Logger.log(`WARNING: Empty XML string received for ${sourceName}`);
+    return [];
+  }
   const document = XmlService.parse(xmlString);
   const root = document.getRootElement();
   const channel = root.getChild("channel");
@@ -407,6 +411,10 @@ function parseRssFeed(xmlString, sourceName) {
 
 // พาร์สข้อมูล Sitemap ของไทยรัฐ (สกัดข่าวจากแท็ก image)
 function parseThairathSitemap(xmlString) {
+  if (!xmlString || !xmlString.trim()) {
+    Logger.log("WARNING: Empty XML string received for ไทยรัฐ");
+    return [];
+  }
   const document = XmlService.parse(xmlString);
   const root = document.getRootElement();
   const ns = XmlService.getNamespace("http://www.sitemaps.org/schemas/sitemap/0.9");
@@ -440,6 +448,10 @@ function parseThairathSitemap(xmlString) {
 
 // พาร์สข้อมูล Google News Sitemap (โพสต์ทูเดย์, ฐานเศรษฐกิจ, กรุงเทพธุรกิจ, มติชน, ประชาชาติธุรกิจ)
 function parseNewsSitemap(xmlString, sourceName) {
+  if (!xmlString || !xmlString.trim()) {
+    Logger.log(`WARNING: Empty XML string received for ${sourceName}`);
+    return [];
+  }
   const document = XmlService.parse(xmlString);
   const root = document.getRootElement();
   const ns = XmlService.getNamespace("http://www.sitemaps.org/schemas/sitemap/0.9");
