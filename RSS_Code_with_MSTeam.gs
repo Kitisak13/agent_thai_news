@@ -81,7 +81,7 @@ function startRssNewsAgent(e) {
     { name: "โพสต์ทูเดย์", url: "https://api.posttoday.com/sitemap/latest", type: "news_sitemap" },
     { name: "ฐานเศรษฐกิจ", url: "https://api.thansettakij.com/sitemap/latest", type: "news_sitemap" },
     { name: "กรุงเทพธุรกิจ", url: "https://api.bangkokbiznews.com/sitemap/latest", type: "news_sitemap" },
-    { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/economy/feed", type: "rss2json" }
+    { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/feed", type: "rss" }
   ];
   
   let allArticles = [];
@@ -90,19 +90,15 @@ function startRssNewsAgent(e) {
   feeds.forEach(feed => {
     try {
       Logger.log(`Fetching feed: ${feed.name} (${feed.url})...`);
-      let parsed = [];
+      const xmlString = fetchXml(feed.url);
       
-      if (feed.type === "rss2json") {
-        parsed = fetchFeedViaRss2Json(feed.url, feed.name);
-      } else {
-        const xmlString = fetchXml(feed.url);
-        if (feed.type === "rss") {
-          parsed = parseRssFeed(xmlString, feed.name);
-        } else if (feed.type === "thairath_sitemap") {
-          parsed = parseThairathSitemap(xmlString);
-        } else if (feed.type === "news_sitemap") {
-          parsed = parseNewsSitemap(xmlString, feed.name);
-        }
+      let parsed = [];
+      if (feed.type === "rss") {
+        parsed = parseRssFeed(xmlString, feed.name);
+      } else if (feed.type === "thairath_sitemap") {
+        parsed = parseThairathSitemap(xmlString);
+      } else if (feed.type === "news_sitemap") {
+        parsed = parseNewsSitemap(xmlString, feed.name);
       }
       
       Logger.log(`Successfully parsed ${parsed.length} items from ${feed.name}`);
@@ -248,11 +244,12 @@ function startRssNewsAgent(e) {
 function fetchXml(url) {
   const p = PropertiesService.getScriptProperties();
   const scraperApiKey = p.getProperty(PROP_SCRAPER_KEY);
+  const backupApiKey = p.getProperty(PROP_SCRAPER_KEY_BACKUP);
   
-  // ตรวจจับว่าต้องใช้ Proxy หรือไม่ (เฉพาะมติชนและประชาชาติธุรกิจที่มักติดบล็อก 403)
+  // ตรวจจับว่าต้องใช้ Proxy ทันทีหรือไม่ (เฉพาะประชาชาติธุรกิจและมติชนที่ติด Cloudflare / 403)
   const isBlockedSite = url.includes("matichon.co.th") || url.includes("prachachat.net");
   
-  // 1. ลองดึงตรงๆ ก่อน (หากไม่ใช่เว็บที่มีประวัติบล็อก หรือไม่มี ScraperAPI key)
+  // 1. สำหรับเว็บทั่วไปที่ไม่ติดบล็อก Cloudflare ให้ลองดึงตรงๆ หรือผ่าน Proxy ฟรี ก่อน
   if (!isBlockedSite) {
     try {
       const response = UrlFetchApp.fetch(url, {
@@ -266,36 +263,35 @@ function fetchXml(url) {
       if (response.getResponseCode() === 200) {
         return sanitizeXmlEntities(response.getContentText());
       }
-      Logger.log(`Direct fetch for ${url} returned status ${response.getResponseCode()}. Trying proxy...`);
+      Logger.log(`Direct fetch for ${url} returned status ${response.getResponseCode()}. Trying free proxy...`);
     } catch (e) {
-      Logger.log(`Direct fetch failed for ${url}: ${e.toString()}. Trying proxy...`);
+      Logger.log(`Direct fetch failed for ${url}: ${e.toString()}. Trying free proxy...`);
     }
-  }
-  
-  // 2. ลองผ่าน AllOrigins (Free Web Proxy) - ช่วยหลบเลี่ยงการบล็อก IP ของ Google โดยไม่เสียเครดิต ScraperAPI
-  try {
-    const proxyUrl = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
-    const response = UrlFetchApp.fetch(proxyUrl, {
-      method: "get",
-      muteHttpExceptions: true
-    });
-    if (response.getResponseCode() === 200) {
-      const json = JSON.parse(response.getContentText());
-      if (json.contents) {
-        Logger.log(`Successfully fetched via AllOrigins Free Proxy for: ${url}`);
-        return sanitizeXmlEntities(json.contents);
+    
+    // ลองผ่าน AllOrigins (Free Web Proxy) สำหรับเว็บทั่วไปที่เกิดปัญหาชั่วคราว
+    try {
+      const proxyUrl = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+      const response = UrlFetchApp.fetch(proxyUrl, {
+        method: "get",
+        muteHttpExceptions: true
+      });
+      if (response.getResponseCode() === 200) {
+        const json = JSON.parse(response.getContentText());
+        if (json.contents) {
+          Logger.log(`Successfully fetched via AllOrigins Free Proxy for: ${url}`);
+          return sanitizeXmlEntities(json.contents);
+        }
       }
+    } catch (e) {
+      Logger.log(`AllOrigins proxy failed for ${url}: ${e.toString()}. Falling back to ScraperAPI...`);
     }
-  } catch (e) {
-    Logger.log(`AllOrigins proxy failed for ${url}: ${e.toString()}. Falling back to ScraperAPI...`);
   }
   
-  // 3. ใช้ ScraperAPI เป็นทางเลือกสุดท้าย (คีย์หลัก)
+  // 2. สำหรับเว็บที่ติด Cloudflare (เช่น ประชาชาติธุรกิจ) หรือกรณีเว็บทั่วไปที่สองขั้นแรกล้มเหลว
+  // ให้วิ่งตรงเข้า ScraperAPI ทันที (รวดเร็ว และ Bypass Cloudflare ได้อย่างแน่นอน)
   if (scraperApiKey) {
     try {
-      // แนบพารามิเตอร์ max_cost=25 เพื่อควบคุมไม่ให้ค่าใช้จ่ายเกิน 25 เครดิตต่อครั้ง (ป้องกันโหมดหรู/แพงเกินไป)
-      // แต่ยอมรับราคา Bypass Cloudflare หน้าข่าวหลัก (ปกติประมาณ 10-15 เครดิต) ซึ่งเกิดน้อยครั้งมากต่อวัน
-      const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=25";
+      const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url);
       Logger.log("Fetching via Primary ScraperAPI Proxy for: " + url);
       
       const response = UrlFetchApp.fetch(scraperUrl, {
@@ -312,11 +308,10 @@ function fetchXml(url) {
     }
   }
   
-  // 4. ลองใช้ ScraperAPI คีย์สำรอง (Backup Key) หากมีตั้งค่าไว้
-  const backupApiKey = p.getProperty(PROP_SCRAPER_KEY_BACKUP);
+  // 3. ลองใช้ ScraperAPI คีย์สำรอง (Backup Key) หากคีย์หลักล้มเหลว
   if (backupApiKey) {
     try {
-      const scraperUrl = "http://api.scraperapi.com?api_key=" + backupApiKey + "&url=" + encodeURIComponent(url) + "&max_cost=25";
+      const scraperUrl = "http://api.scraperapi.com?api_key=" + backupApiKey + "&url=" + encodeURIComponent(url);
       Logger.log("Fetching via Backup ScraperAPI Proxy for: " + url);
       
       const response = UrlFetchApp.fetch(scraperUrl, {
@@ -495,44 +490,6 @@ function parseNewsSitemap(xmlString, sourceName) {
   return items;
 }
 
-// ดึงข้อมูลฟีดข่าวผ่าน API บริการฟรีของ rss2json เพื่อเลี่ยงการติดบล็อก Cloudflare และประหยัดเครดิต ScraperAPI
-function fetchFeedViaRss2Json(feedUrl, sourceName) {
-  try {
-    const apiUrl = "https://api.rss2json.com/v1/api.json?rss_url=" + encodeURIComponent(feedUrl);
-    const response = UrlFetchApp.fetch(apiUrl, {
-      method: "get",
-      muteHttpExceptions: true
-    });
-    
-    if (response.getResponseCode() === 200) {
-      const json = JSON.parse(response.getContentText());
-      if (json.status === "ok" && json.items) {
-        Logger.log(`Successfully fetched and parsed feed via rss2json for ${sourceName}`);
-        return json.items.map(item => {
-          let pubDate = null;
-          if (item.pubDate) {
-            // ฟอร์แมตของ rss2json มักเป็น "YYYY-MM-DD HH:mm:ss" ในหน่วย UTC
-            // แปลงสัญลักษณ์ '-' เป็น '/' เพื่อหลีกเลี่ยงข้อผิดพลาดในการพาร์สของ V8 engine บางเครื่อง
-            const normalizedDateStr = item.pubDate.replace(/-/g, "/");
-            pubDate = new Date(normalizedDateStr + " UTC");
-          }
-          return {
-            title: (item.title || "").trim(),
-            link: (item.link || "").trim(),
-            description: (item.description || item.content || "").replace(/<[^>]*>/g, "").trim(),
-            pubDate: pubDate,
-            source: sourceName
-          };
-        });
-      }
-    }
-    throw new Error(`rss2json API returned HTTP status ${response.getResponseCode()}`);
-  } catch (e) {
-    Logger.log(`ERROR in fetchFeedViaRss2Json for ${sourceName}: ${e.toString()}`);
-    // ส่งกลับอาร์เรย์ว่างเพื่อให้ระบบรันต่อได้แบบ Graceful
-    return [];
-  }
-}
 
 // พาร์สฟอร์แมตวันที่จากข้อความของ RSS Feed
 function parseFeedDate(dateStr) {
