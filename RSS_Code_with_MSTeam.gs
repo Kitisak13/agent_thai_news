@@ -768,10 +768,10 @@ function getExistingNewsKeys(sheet) {
 // ==========================================
 function sendEmailNotification(newItems, docUrl) {
   const p = PropertiesService.getScriptProperties();
-  const recipient = p.getProperty(PROP_EMAIL_RECIPIENT) || "Kitisak.jun@cpintertrade.com";
+  const recipient = (p.getProperty(PROP_EMAIL_RECIPIENT) || "").trim();
   
   if (!recipient) {
-    Logger.log("WARNING: ไม่พบอีเมลผู้รับการแจ้งเตือน");
+    Logger.log("Email notification is disabled (NOTIFICATION_EMAIL is empty or not set).");
     return;
   }
   
