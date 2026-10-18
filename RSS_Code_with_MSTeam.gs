@@ -248,8 +248,7 @@ function startRssNewsAgent(e) {
               Logger.log(`WARNING: ไม่สามารถโหลด HTML ข่าวต้นฉบับได้สำหรับ: ${item.headline}. Error: ${fetchErr.toString()}`);
             }
             const fullText = fetchFullContentWithGemini(htmlContent || item.url, apiKey, item.url);
-            const imageBlob = fetchFeaturedImage(htmlContent, item.url);
-            appendNewsToDoc(doc, item, fullText, imageBlob);
+            appendNewsToDoc(doc, item, fullText);
           }
         }
         
@@ -1143,58 +1142,6 @@ function getOrCreateDailyDoc(folderId) {
   }
 }
 
-// สกัดภาพหน้าปก / อินโฟกราฟิกหลักผ่าน og:image tag พร้อมแปลงภาพ WebP เป็น JPG ผ่าน CDN Proxy
-function fetchFeaturedImage(html, url) {
-  try {
-    let htmlContent = html;
-    if (!htmlContent && url) {
-      htmlContent = fetchXml(url);
-    }
-    if (!htmlContent) return null;
-    
-    // ใช้ Regex ค้นหาแท็ก og:image ใน HTML ของบทความ
-    let imageUrl = null;
-    const match1 = htmlContent.match(/meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
-    const match2 = htmlContent.match(/meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i);
-    
-    if (match1 && match1[1]) {
-      imageUrl = match1[1].trim().replace(/&amp;/g, "&");
-    } else if (match2 && match2[1]) {
-      imageUrl = match2[1].trim().replace(/&amp;/g, "&");
-    }
-    
-    if (imageUrl) {
-      let finalImageUrl = imageUrl;
-      const lowerUrl = imageUrl.toLowerCase();
-      
-      // แปลงไฟล์ WebP ผ่าน Image Proxy ฟรี (wsrv.nl) ให้เป็น JPEG เพื่อให้ Google Docs รองรับ
-      if (lowerUrl.includes(".webp") || lowerUrl.includes("format=webp")) {
-        finalImageUrl = `https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}&output=jpg`;
-      }
-      
-      Logger.log("Fetching featured image from: " + finalImageUrl);
-      const response = UrlFetchApp.fetch(finalImageUrl, { muteHttpExceptions: true });
-      if (response.getResponseCode() === 200) {
-        const blob = response.getBlob();
-        const contentType = (blob.getContentType() || "").toLowerCase();
-        
-        // หาก Content-Type ยังเป็น webp อยู่ (กรณี URL ไม่มีนามสกุล .webp) ให้แปลงผ่าน wsrv.nl
-        if (contentType.includes("webp")) {
-          const fallbackUrl = `https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}&output=jpg`;
-          const fallbackResp = UrlFetchApp.fetch(fallbackUrl, { muteHttpExceptions: true });
-          if (fallbackResp.getResponseCode() === 200) {
-            return fallbackResp.getBlob();
-          }
-          return null;
-        }
-        return blob;
-      }
-    }
-  } catch (e) {
-    Logger.log("WARNING: ไม่สามารถโหลดรูปภาพประกอบของหน้าเว็บได้ " + url + ". Error: " + e.toString());
-  }
-  return null;
-}
 
 // ทำความสะอาด HTML ดิบโดยลบแท็กโครงสร้างเว็บไซต์และสคริปต์ออกทั้งหมด ก่อนตัดความยาว
 function cleanHtmlForAI(html) {
@@ -1288,8 +1235,8 @@ Rules:
   return "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้";
 }
 
-// นำข่าว สรุปย่อ ภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc (คลีนตามแบบ R_261015.doc)
-function appendNewsToDoc(doc, item, fullText, imageBlob) {
+// นำข่าว สรุปย่อ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc (คลีนตามแบบ R_261015.doc)
+function appendNewsToDoc(doc, item, fullText) {
   const body = doc.getBody();
   
   // 1. หัวข้อข่าวหลัก (Font: Cordia New, Size: 16, Bold)
@@ -1299,28 +1246,49 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
   heading.setSpacingBefore(14);
   heading.setSpacingAfter(6);
   
-  // 2. สรุปย่อโดย AI (คลีนๆ ไม่ใส่ icon ตามที่ผู้ใช้ระบุ)
+  // 2. สรุปย่อโดย AI (จัดในกรอบข้อความ Callout Box แยกชัดเจนจากเนื้อหาข่าวจริง)
   if (item.summary && item.summary !== "ไม่มีสรุปเนื้อหา") {
-    const summaryHeading = body.appendParagraph("สรุปสาระสำคัญโดย AI:");
+    const table = body.appendTable();
+    const row = table.appendTableRow();
+    const cell = row.appendTableCell();
+    
+    // ตั้งค่าสไตล์กรอบข้อความ (เส้นขอบสีเทาอ่อน และพื้นหลังสีเทาอ่อนสว่างเพื่อความสบายตาและโดดเด่น)
+    const tableAttrs = {};
+    tableAttrs[DocumentApp.Attribute.BORDER_COLOR] = "#D0D7DE";
+    tableAttrs[DocumentApp.Attribute.BORDER_WIDTH] = 1;
+    table.setAttributes(tableAttrs);
+    
+    cell.setBackgroundColor("#F8F9FA");
+    cell.setPaddingTop(8);
+    cell.setPaddingBottom(8);
+    cell.setPaddingLeft(14);
+    cell.setPaddingRight(14);
+    
+    // หัวข้อภายในกรอบ Callout
+    const summaryHeading = cell.getChild(0).asParagraph();
+    summaryHeading.setText("สรุปสาระสำคัญโดย AI:");
     styleParagraph(summaryHeading, "Cordia New", 14, "#000000", true, false);
-    summaryHeading.setSpacingBefore(4);
-    summaryHeading.setSpacingAfter(2);
-
-    const summaryParagraph = body.appendParagraph(item.summary);
-    styleParagraph(summaryParagraph, "Cordia New", 14, "#333333", false, false);
-    summaryParagraph.setSpacingAfter(4);
-  }
-  
-  if (item.metrics && item.metrics !== "ไม่มี") {
-    const metricsParagraph = body.appendParagraph(`ตัวเลขและสถิติสำคัญ: ${item.metrics}`);
-    styleParagraph(metricsParagraph, "Cordia New", 14, "#000000", true, false);
-    metricsParagraph.setSpacingAfter(6);
+    summaryHeading.setSpacingAfter(4);
+    
+    // เนื้อหาสรุปย่อ
+    const summaryParagraph = cell.appendParagraph(item.summary);
+    styleParagraph(summaryParagraph, "Cordia New", 14, "#24292F", false, false);
+    
+    // ตัวเลขและสถิติสำคัญ (ถ้ามี)
+    if (item.metrics && item.metrics !== "ไม่มี") {
+      summaryParagraph.setSpacingAfter(4);
+      const metricsParagraph = cell.appendParagraph(`ตัวเลขและสถิติสำคัญ: ${item.metrics}`);
+      styleParagraph(metricsParagraph, "Cordia New", 14, "#000000", true, false);
+      metricsParagraph.setSpacingAfter(0);
+    } else {
+      summaryParagraph.setSpacingAfter(0);
+    }
   }
   
   // 3. บทความข่าวฉบับเต็ม จัดแยกเป็นย่อหน้าคลีนๆ (Cordia New, Size: 14)
   if (fullText && fullText !== "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้") {
     const paragraphs = fullText.split("\n").map(p => p.trim()).filter(p => p.length > 0);
-    paragraphs.forEach(para => {
+    paragraphs.forEach((para, pIdx) => {
       // ตรวจสอบว่าพารากราฟเป็นหัวข้อย่อยหรือไม่ (เช่นขึ้นต้นด้วย ** หรือสั้นและเป็นหัวข้อ)
       const isSubheading = (para.startsWith("**") && para.endsWith("**")) || 
                            (para.startsWith("###") || para.startsWith("##"));
@@ -1329,10 +1297,11 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
         const pElem = body.appendParagraph(cleanPara);
         if (isSubheading) {
           styleParagraph(pElem, "Cordia New", 14, "#000000", true, false);
-          pElem.setSpacingBefore(6);
+          pElem.setSpacingBefore(pIdx === 0 ? 10 : 6);
           pElem.setSpacingAfter(3);
         } else {
           styleParagraph(pElem, "Cordia New", 14, "#000000", false, false);
+          pElem.setSpacingBefore(pIdx === 0 ? 10 : 0);
           pElem.setSpacingAfter(4);
         }
       }
@@ -1340,27 +1309,11 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
   } else {
     const fallbackPara = body.appendParagraph(item.summary || "ไม่สามารถแสดงรายละเอียดข่าวฉบับเต็มได้");
     styleParagraph(fallbackPara, "Cordia New", 14, "#000000", false, false);
+    fallbackPara.setSpacingBefore(10);
     fallbackPara.setSpacingAfter(6);
   }
   
-  // 4. แทรกรูปภาพประกอบ (หากโหลดภาพสำเร็จ - ไม่ใส่หัวข้อไอคอนให้รกตา)
-  if (imageBlob) {
-    try {
-      const image = body.appendImage(imageBlob);
-      const originalWidth = image.getWidth();
-      const originalHeight = image.getHeight();
-      const maxWidth = 450;
-      if (originalWidth > maxWidth) {
-        const ratio = maxWidth / originalWidth;
-        image.setWidth(maxWidth);
-        image.setHeight(originalHeight * ratio);
-      }
-    } catch (e) {
-      Logger.log("WARNING: ไม่สามารถแทรกรูปภาพประกอบลงใน Google Doc ได้: " + e.toString());
-    }
-  }
-  
-  // 5. Source และ URL ใต้เนื้อหาข่าว คลีนแบบ R_261015.doc (เพิ่ม URL อีกบรรทัดใต้ Source)
+  // 4. Source และ URL ใต้เนื้อหาข่าว คลีนแบบ R_261015.doc (เพิ่ม URL อีกบรรทัดใต้ Source)
   const sourceName = item.source || "ไม่ระบุ";
   const sourcePrefix = (!sourceName.startsWith("หนังสือพิมพ์") && !sourceName.startsWith("สำนักข่าว") && !sourceName.includes("ออนไลน์")) ? "หนังสือพิมพ์ " : "";
   const sourceText = `Source: ${sourcePrefix}${sourceName} วันที่ ${item.publish_date || "ไม่ระบุ"}`;
@@ -1381,7 +1334,7 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
     urlParagraph.setSpacingAfter(10);
   }
   
-  // 6. เส้นคั่นระหว่างข่าว
+  // 5. เส้นคั่นระหว่างข่าว
   body.appendHorizontalRule();
 }
 
