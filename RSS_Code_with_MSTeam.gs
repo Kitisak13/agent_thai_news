@@ -32,11 +32,11 @@ const FILTER_KEYWORDS = [
 
 // 2. รายชื่อสินค้าเกษตรที่ให้ AI สกัด (ใช้ประกอบใน System Prompt อัตโนมัติ)
 const TARGET_PRODUCTS = [
-  "ข้าว (Rice / Paddy / Brown Rice)",
+  "ข้าว (Rice / Paddy / Brown Rice / White Rice / Parboiled Rice) - เฉพาะข้าวเปลือก ข้าวสาร และห่วงโซ่อุปทานข้าวทางการเกษตร",
   "ข้าวโพด (Corn / Maize)",
   "มันสำปะหลัง หรือผลิตภัณฑ์มันสำปะหลัง (Cassava / Tapioca / Cassava Chips)",
   "ข้าวสาลี (Wheat)",
-  "อาหารสัตว์ และ รำข้าว (Animal Feed / Rice Bran / Raw Materials)"
+  "อาหารสัตว์ และ รำข้าว (Animal Feed / Rice Bran / Raw Materials for Feed)"
 ];
 
 // 3. หัวข้อข่าวเชิงลึกที่ให้ AI สกัด (ใช้ประกอบใน System Prompt อัตโนมัติ)
@@ -74,6 +74,7 @@ function startRssNewsAgent(e) {
     }
   }
   
+  // รายการสำนักข่าวเป้าหมาย (รวมทั้งสิ้น 8 สำนักข่าวตามเอกสาร README)
   const feeds = [
     { name: "ผู้จัดการออนไลน์", url: "https://mgronline.com/store/rss/index.xml", type: "rss" },
     { name: "แนวหน้า", url: "https://www.naewna.com/n/feed/", type: "rss" },
@@ -81,6 +82,7 @@ function startRssNewsAgent(e) {
     { name: "โพสต์ทูเดย์", url: "https://api.posttoday.com/sitemap/latest", type: "news_sitemap" },
     { name: "ฐานเศรษฐกิจ", url: "https://api.thansettakij.com/sitemap/latest", type: "news_sitemap" },
     { name: "กรุงเทพธุรกิจ", url: "https://api.bangkokbiznews.com/sitemap/latest", type: "news_sitemap" },
+    { name: "มติชน", url: "https://www.matichon.co.th/sitemap-news.xml", type: "news_sitemap" },
     { name: "ประชาชาติธุรกิจ", url: "https://www.prachachat.net/feed", type: "rss" }
   ];
   
@@ -157,7 +159,7 @@ function startRssNewsAgent(e) {
     return;
   }
   
-  // 3. กรองหัวข้อข่าวขั้นต้นด้วย Keywords ที่เกี่ยวข้องกับข้าวและการเกษตร
+  // 3. กรองหัวข้อข่าวขั้นต้นด้วย Keywords ที่เกี่ยวข้องกับข้าวและการเกษตร (พร้อม Negative Filtering)
   const candidates = filterByKeywords(uniqueArticles);
   Logger.log(`Candidate articles after keyword filtering: ${candidates.length} items.`);
   
@@ -165,32 +167,53 @@ function startRssNewsAgent(e) {
     Logger.log("No new agricultural or rice crop candidate news found after keyword filtering.");
     return;
   }
+
+  // ผูก ref_id เข้าไปกับข่าวแต่ละชิ้น เพื่อให้อ้างอิงกลับคืนได้แม่นยำ 100% ป้องกันวันที่และ URL เพี้ยน
+  const candidatesWithId = candidates.map((c, idx) => ({
+    ref_id: idx,
+    title: c.title,
+    description: c.description,
+    source: c.source,
+    link: c.link
+  }));
   
   // 4. ส่งข่าวที่ผ่านการกรองขั้นต้นไปให้ Gemini เพื่อวิเคราะห์และแปลงเป็น JSON ภาษาไทย
+  // พร้อมส่งรายการพาดหัวข่าวในประวัติล่าสุด (recentHeadlines) เพื่อทำ Cross-Run Semantic Deduplication
   Logger.log("Sending candidates to Gemini for final classification and extraction...");
   try {
-    const jsonArray = parseCandidatesWithGemini(candidates, apiKey);
+    const recentHeadlines = existingKeys ? (existingKeys.recentHeadlines || []) : [];
+    const jsonArray = parseCandidatesWithGemini(candidatesWithId, apiKey, recentHeadlines);
     
-    // ดึงเวลาเผยแพร่ข่าวที่แท้จริงจากสำนักข่าวมาแทนที่วันที่ดิบของ Gemini เพื่อความแม่นยำสูง
+    // ดึงเวลาเผยแพร่ข่าวและ URL ที่แท้จริงจากสำนักข่าวมาแทนที่ของ Gemini เพื่อความแม่นยำ 100%
     if (jsonArray && jsonArray.length > 0) {
       jsonArray.forEach(newsItem => {
-        const urlKey = (newsItem.url || "").toString().trim().toLowerCase();
-        const headlineKey = (newsItem.headline || "").toString().trim().toLowerCase();
+        let match = null;
+        // อ้างอิงผ่าน ref_id เป็นอันดับแรก
+        if (typeof newsItem.ref_id === "number" && candidates[newsItem.ref_id]) {
+          match = candidates[newsItem.ref_id];
+        } else {
+          // Fallback matching เผื่อกรณี AI ไม่คืน ref_id
+          const urlKey = (newsItem.url || "").toString().trim().toLowerCase();
+          const headlineKey = (newsItem.headline || "").toString().trim().toLowerCase();
+          match = candidates.find(c => {
+            const cUrl = (c.link || "").toString().trim().toLowerCase();
+            const cTitle = (c.title || "").toString().trim().toLowerCase();
+            return (urlKey && cUrl === urlKey) || (headlineKey && cTitle === headlineKey);
+          });
+        }
         
-        const match = candidates.find(c => {
-          const cUrl = (c.link || "").toString().trim().toLowerCase();
-          const cTitle = (c.title || "").toString().trim().toLowerCase();
-          return (urlKey && cUrl === urlKey) || (headlineKey && cTitle === headlineKey);
-        });
-        
-        if (match && match.pubDate) {
-          // ฟอร์แมตวันเวลาในเขตนครหลวงกรุงเทพฯ เช่น 2026-07-23 09:42 น.
-          newsItem.publish_date = Utilities.formatDate(match.pubDate, "Asia/Bangkok", "yyyy-MM-dd HH:mm น.");
+        if (match) {
+          newsItem.url = match.link; // ใช้ URL ต้นฉบับเสมอ ป้องกัน URL ถูก AI ดัดแปลงหรือตัด query string
+          newsItem.source = match.source || newsItem.source;
+          if (match.pubDate) {
+            // ฟอร์แมตวันเวลาในเขตนครหลวงกรุงเทพฯ เช่น 2026-07-23 09:42 น.
+            newsItem.publish_date = Utilities.formatDate(match.pubDate, "Asia/Bangkok", "yyyy-MM-dd HH:mm น.");
+          }
         }
       });
     }
     
-    // 5. บันทึกผลลัพธ์ลง Google Sheet (ส่งผ่าน sheet และ keys เพื่อลด Overhead)
+    // 5. บันทึกผลลัพธ์ลง Google Sheet แบบ Batch Append (ส่งผ่าน sheet และ keys เพื่อลด Overhead)
     const newItems = saveJsonToSheet(jsonArray, sheet, existingKeys);
     
     // 6. หากมีข่าวใหม่ ให้ทำเอกสารรายงานและส่งการแจ้งเตือน
@@ -200,10 +223,24 @@ function startRssNewsAgent(e) {
         const folderId = p.getProperty(PROP_DRIVE_FOLDER);
         const doc = getOrCreateDailyDoc(folderId);
         
-        // วนลูปสกัดเนื้อหาและภาพเพื่อบันทึกลง Doc (โหลด HTML เพียงรอบเดียวต่อข่าว)
-        newItems.forEach(item => {
+        // กำหนดเวลาเริ่มทำงาน และจำกัดโควตาเพื่อป้องกัน Execution Timeout (6 นาที)
+        const startTime = new Date().getTime();
+        const MAX_DOC_ITEMS_PER_RUN = 8; // สกัดเนื้อหาเต็มลง Google Doc สูงสุด 8 ข่าวต่อรอบเพื่อความปลอดภัย
+        const MAX_PROCESSING_TIME_MS = 4.5 * 60 * 1000; // ตัดจบปลอดภัยที่ 4.5 นาที
+        
+        const itemsToProcess = newItems.slice(0, MAX_DOC_ITEMS_PER_RUN);
+        if (newItems.length > MAX_DOC_ITEMS_PER_RUN) {
+          Logger.log(`NOTICE: มีข่าวใหม่ทั้งหมด ${newItems.length} ข่าว ระบบจะสกัดเนื้อหาลง Google Doc จำนวน ${MAX_DOC_ITEMS_PER_RUN} ข่าวแรก เพื่อป้องกัน Execution Timeout`);
+        }
+
+        for (let i = 0; i < itemsToProcess.length; i++) {
+          const item = itemsToProcess[i];
+          if (new Date().getTime() - startTime > MAX_PROCESSING_TIME_MS) {
+            Logger.log(`WARNING: เวลาประมวลผลใกล้ถึงขีดจำกัด (4.5 นาที) ระบบจะปิดบันทึก Google Doc และส่งการแจ้งเตือนทันที`);
+            break;
+          }
           if (item.url) {
-            Logger.log(`Processing Google Doc content for: ${item.headline}`);
+            Logger.log(`Processing Google Doc content (${i + 1}/${itemsToProcess.length}) for: ${item.headline}`);
             let htmlContent = null;
             try {
               htmlContent = fetchXml(item.url);
@@ -214,7 +251,7 @@ function startRssNewsAgent(e) {
             const imageBlob = fetchFeaturedImage(htmlContent, item.url);
             appendNewsToDoc(doc, item, fullText, imageBlob);
           }
-        });
+        }
         
         // ดึงแชร์ลิงก์ของ Google Doc และปิดประมวลผลเซฟไฟล์
         docUrl = doc.getUrl();
@@ -287,7 +324,7 @@ function fetchXml(url) {
     }
   }
   
-  // 2. สำหรับเว็บที่ติด Cloudflare (เช่น ประชาชาติธุรกิจ) หรือกรณีเว็บทั่วไปที่สองขั้นแรกล้มเหลว
+  // 2. สำหรับเว็บที่ติด Cloudflare (เช่น ประชาชาติธุรกิจ, มติชน) หรือกรณีเว็บทั่วไปที่สองขั้นแรกล้มเหลว
   // ให้วิ่งตรงเข้า ScraperAPI ทันที (รวดเร็ว และ Bypass Cloudflare ได้อย่างแน่นอน)
   if (scraperApiKey) {
     try {
@@ -331,7 +368,7 @@ function fetchXml(url) {
   throw new Error("Failed to fetch content for " + url + " (No working scraper API key available)");
 }
 
-// ฟังก์ชันสำหรับแทนที่ HTML Entity ที่ไม่ใช่ XML Entity มาตรฐาน เพื่อไม่ให้โครงสร้าง XML พังระหว่างการพาร์ส
+// ฟังก์ชันสำหรับแทนที่ HTML Entity ที่ไม่ใช่ XML Entity มาตรฐาน และแปลง Unescaped & ป้องกัน XmlService พัง
 function sanitizeXmlEntities(xmlString) {
   if (!xmlString) return "";
   
@@ -357,7 +394,7 @@ function sanitizeXmlEntities(xmlString) {
     "sect": "§"
   };
   
-  return xmlString.replace(/&([a-zA-Z0-9]+);/g, function(match, name) {
+  let cleaned = xmlString.replace(/&([a-zA-Z0-9]+);/g, function(match, name) {
     const lowerName = name.toLowerCase();
     // ถ้าเป็น XML Entity มาตรฐาน 5 ตัว ให้คงไว้
     if (["amp", "lt", "gt", "quot", "apos"].includes(lowerName)) {
@@ -370,6 +407,11 @@ function sanitizeXmlEntities(xmlString) {
     // ถ้าไม่มี ให้แทนที่ด้วยช่องว่างเพื่อป้องกันการพาร์สพัง
     return " ";
   });
+
+  // แปลงเครื่องหมาย & โดดเดี่ยวที่ไม่ได้เป็นส่วนหนึ่งของ XML entity หรือ numeric entity ให้เป็น &amp;
+  cleaned = cleaned.replace(/&(?!(?:apos|quot|[gl]t|amp);|#)/gi, "&amp;");
+  
+  return cleaned;
 }
 
 // พาร์สข้อมูล RSS Feed
@@ -378,72 +420,95 @@ function parseRssFeed(xmlString, sourceName) {
     Logger.log(`WARNING: Empty XML string received for ${sourceName}`);
     return [];
   }
-  const document = XmlService.parse(xmlString);
-  const root = document.getRootElement();
-  const channel = root.getChild("channel");
-  
-  if (!channel) return [];
-  
-  const items = channel.getChildren("item");
-  const parsedItems = [];
-  
-  items.forEach(item => {
-    const title = item.getChildText("title") || "";
-    const link = item.getChildText("link") || "";
-    const description = item.getChildText("description") || "";
-    const pubDateStr = item.getChildText("pubDate") || "";
+  try {
+    const document = XmlService.parse(xmlString);
+    const root = document.getRootElement();
+    const channel = root.getChild("channel");
     
-    // ลบ HTML tag ใน description
-    const cleanDesc = description.replace(/<[^>]*>/g, "").trim();
-    const pubDate = parseFeedDate(pubDateStr);
+    if (!channel) return [];
     
-    parsedItems.push({
-      title: title.trim(),
-      link: link.trim(),
-      description: cleanDesc,
-      pubDate: pubDate,
-      source: sourceName
+    const items = channel.getChildren("item");
+    const parsedItems = [];
+    
+    items.forEach(item => {
+      const title = item.getChildText("title") || "";
+      const link = item.getChildText("link") || "";
+      const description = item.getChildText("description") || "";
+      const pubDateStr = item.getChildText("pubDate") || "";
+      
+      // ลบ HTML tag ใน description
+      const cleanDesc = description.replace(/<[^>]*>/g, "").trim();
+      const pubDate = parseFeedDate(pubDateStr);
+      
+      parsedItems.push({
+        title: title.trim(),
+        link: link.trim(),
+        description: cleanDesc,
+        pubDate: pubDate,
+        source: sourceName
+      });
     });
-  });
-  
-  return parsedItems;
+    
+    return parsedItems;
+  } catch (err) {
+    Logger.log(`ERROR parsing RSS XML for ${sourceName}: ${err.toString()}`);
+    return [];
+  }
 }
 
-// พาร์สข้อมูล Sitemap ของไทยรัฐ (สกัดข่าวจากแท็ก image)
+// พาร์สข้อมูล Sitemap ของไทยรัฐ (สกัดข่าวจากแท็ก image และดึง pubDate จาก lastmod)
 function parseThairathSitemap(xmlString) {
   if (!xmlString || !xmlString.trim()) {
     Logger.log("WARNING: Empty XML string received for ไทยรัฐ");
     return [];
   }
-  const document = XmlService.parse(xmlString);
-  const root = document.getRootElement();
-  const ns = XmlService.getNamespace("http://www.sitemaps.org/schemas/sitemap/0.9");
-  const nsImage = XmlService.getNamespace("image", "http://www.google.com/schemas/sitemap-image/1.1");
-  
-  const urls = root.getChildren("url", ns);
-  const items = [];
-  
-  urls.forEach(urlElement => {
-    const loc = urlElement.getChildText("loc", ns);
-    const imageElement = urlElement.getChild("image", nsImage);
-    let title = "";
-    let description = "";
-    if (imageElement) {
-      title = imageElement.getChildText("title", nsImage) || "";
-      description = imageElement.getChildText("caption", nsImage) || "";
-    }
+  try {
+    const document = XmlService.parse(xmlString);
+    const root = document.getRootElement();
+    const ns = XmlService.getNamespace("http://www.sitemaps.org/schemas/sitemap/0.9");
+    const nsImage = XmlService.getNamespace("image", "http://www.google.com/schemas/sitemap-image/1.1");
     
-    if (title) {
-      items.push({
-        title: title.trim(),
-        link: loc.trim(),
-        description: description.trim(),
-        pubDate: new Date(), // sitemap-daily.xml ถือเป็นข่าวของวันนั้นๆ
-        source: "ไทยรัฐ"
-      });
-    }
-  });
-  return items;
+    const urls = root.getChildren("url", ns);
+    const items = [];
+    
+    urls.forEach(urlElement => {
+      const loc = urlElement.getChildText("loc", ns);
+      const lastmodStr = urlElement.getChildText("lastmod", ns);
+      const imageElement = urlElement.getChild("image", nsImage);
+      let title = "";
+      let description = "";
+      if (imageElement) {
+        title = imageElement.getChildText("title", nsImage) || "";
+        description = imageElement.getChildText("caption", nsImage) || "";
+      }
+      
+      if (title) {
+        let pubDate = new Date();
+        if (lastmodStr) {
+          try {
+            const parsed = new Date(lastmodStr);
+            if (!isNaN(parsed.getTime())) {
+              pubDate = parsed;
+            }
+          } catch (e) {
+            Logger.log(`Error parsing Thairath lastmod: ${lastmodStr}`);
+          }
+        }
+        
+        items.push({
+          title: title.trim(),
+          link: (loc || "").trim(),
+          description: description.trim(),
+          pubDate: pubDate,
+          source: "ไทยรัฐ"
+        });
+      }
+    });
+    return items;
+  } catch (err) {
+    Logger.log(`ERROR parsing Thairath Sitemap XML: ${err.toString()}`);
+    return [];
+  }
 }
 
 // พาร์สข้อมูล Google News Sitemap (โพสต์ทูเดย์, ฐานเศรษฐกิจ, กรุงเทพธุรกิจ, มติชน, ประชาชาติธุรกิจ)
@@ -452,56 +517,60 @@ function parseNewsSitemap(xmlString, sourceName) {
     Logger.log(`WARNING: Empty XML string received for ${sourceName}`);
     return [];
   }
-  const document = XmlService.parse(xmlString);
-  const root = document.getRootElement();
-  const ns = XmlService.getNamespace("http://www.sitemaps.org/schemas/sitemap/0.9");
-  const nsNews = XmlService.getNamespace("news", "http://www.google.com/schemas/sitemap-news/0.9");
-  const nsImage = XmlService.getNamespace("image", "http://www.google.com/schemas/sitemap-image/1.1");
-  
-  const urls = root.getChildren("url", ns);
-  const items = [];
-  
-  urls.forEach(urlElement => {
-    const loc = urlElement.getChildText("loc", ns);
-    const newsElement = urlElement.getChild("news", nsNews);
+  try {
+    const document = XmlService.parse(xmlString);
+    const root = document.getRootElement();
+    const ns = XmlService.getNamespace("http://www.sitemaps.org/schemas/sitemap/0.9");
+    const nsNews = XmlService.getNamespace("news", "http://www.google.com/schemas/sitemap-news/0.9");
+    const nsImage = XmlService.getNamespace("image", "http://www.google.com/schemas/sitemap-image/1.1");
     
-    let title = "";
-    let pubDateStr = "";
+    const urls = root.getChildren("url", ns);
+    const items = [];
     
-    if (newsElement) {
-      title = newsElement.getChildText("title", nsNews) || "";
-      pubDateStr = newsElement.getChildText("publication_date", nsNews) || "";
-    }
-    
-    // พยายามดึงภาพ / คำอธิบายภาพมาเป็น description เผื่อใช้สแกน Keyword กรองเบื้องต้น
-    let description = "";
-    const imageElement = urlElement.getChild("image", nsImage);
-    if (imageElement) {
-      description = imageElement.getChildText("caption", nsImage) || "";
-    }
-    
-    if (title) {
-      let pubDate = new Date();
-      if (pubDateStr) {
-        try {
-          pubDate = new Date(pubDateStr);
-        } catch (e) {
-          Logger.log(`Error parsing news publication date: ${pubDateStr}`);
-        }
+    urls.forEach(urlElement => {
+      const loc = urlElement.getChildText("loc", ns);
+      const newsElement = urlElement.getChild("news", nsNews);
+      
+      let title = "";
+      let pubDateStr = "";
+      
+      if (newsElement) {
+        title = newsElement.getChildText("title", nsNews) || "";
+        pubDateStr = newsElement.getChildText("publication_date", nsNews) || "";
       }
       
-      items.push({
-        title: title.trim(),
-        link: (loc || "").trim(),
-        description: description.trim(),
-        pubDate: pubDate,
-        source: sourceName
-      });
-    }
-  });
-  return items;
+      // พยายามดึงภาพ / คำอธิบายภาพมาเป็น description เผื่อใช้สแกน Keyword กรองเบื้องต้น
+      let description = "";
+      const imageElement = urlElement.getChild("image", nsImage);
+      if (imageElement) {
+        description = imageElement.getChildText("caption", nsImage) || "";
+      }
+      
+      if (title) {
+        let pubDate = new Date();
+        if (pubDateStr) {
+          try {
+            pubDate = new Date(pubDateStr);
+          } catch (e) {
+            Logger.log(`Error parsing news publication date: ${pubDateStr}`);
+          }
+        }
+        
+        items.push({
+          title: title.trim(),
+          link: (loc || "").trim(),
+          description: description.trim(),
+          pubDate: pubDate,
+          source: sourceName
+        });
+      }
+    });
+    return items;
+  } catch (err) {
+    Logger.log(`ERROR parsing News Sitemap XML for ${sourceName}: ${err.toString()}`);
+    return [];
+  }
 }
-
 
 // พาร์สฟอร์แมตวันที่จากข้อความของ RSS Feed
 function parseFeedDate(dateStr) {
@@ -541,16 +610,50 @@ function isWithinLast24Hours(date) {
   return diffHours >= 0 && diffHours <= 24;
 }
 
-// ตัวกรองคำค้นหา (Keyword Filter) เบื้องต้นเพื่อประหยัดโควตาการประมวลผลของ AI โดยใช้คำค้นจากอาเรย์ FILTER_KEYWORDS ด้านบน
+// ตัวกรองคำค้นหา (Keyword Filter) เบื้องต้นเพื่อประหยัดโควตา AI พร้อมระบบคัดกรองคำเชิงลบ (Negative Filter)
 function filterByKeywords(items) {
+  // คำค้นหาเชิงลบที่บ่งบอกว่าไม่เกี่ยวกับสินค้าเกษตรเป้าหมายแน่นอน
+  const NEGATIVE_KEYWORDS = [
+    "ข้าวแกง", "อาหารตามสั่ง", "ร้านอาหาร", "กุ้งก้ามกราม", "บ่อกุ้ง", "เลี้ยงกุ้ง", "ฟาร์มกุ้ง", "ก๋วยเตี๋ยว", "อาหารจานด่วน", "ข้าวกล่อง"
+  ];
+  
+  // คำที่ยืนยันว่าเป็นสินค้าเกษตรหลักจริง (หากมีคำเหล่านี้ ให้ส่งต่อให้ AI ตรวจสอบ)
+  const STRONG_POSITIVE_KEYWORDS = [
+    "ข้าวเปลือก", "ข้าวสาร", "ส่งออกข้าว", "ราคาข้าว", "โรงสี", "ชาวนา", "กรมการข้าว",
+    "ข้าวโพด", "มันสำปะหลัง", "ข้าวสาลี", "อาหารสัตว์", "รำข้าว", "มันเส้น", "ปุ๋ย", "ธ.ก.ส.", "สต็อกข้าว"
+  ];
+
   return items.filter(item => {
     const textToSearch = (item.title + " " + item.description).toLowerCase();
+    
+    // ตรวจสอบว่ามี Negative Keyword หรือไม่
+    const hasNegative = NEGATIVE_KEYWORDS.some(neg => textToSearch.includes(neg.toLowerCase()));
+    if (hasNegative) {
+      const hasStrongPositive = STRONG_POSITIVE_KEYWORDS.some(pos => textToSearch.includes(pos.toLowerCase()));
+      if (!hasStrongPositive) {
+        Logger.log(`Filtered out by negative keyword: ${item.title}`);
+        return false;
+      }
+    }
+    
     return FILTER_KEYWORDS.some(keyword => textToSearch.includes(keyword.toLowerCase()));
   });
 }
 
-// ฟังก์ชันสร้าง System Prompt แบบไดนามิกอ้างอิงตามค่าหัวข้อสินค้าเกษตรและนโยบายที่กำหนดไว้ด้านบน
-function getSystemPrompt() {
+// ฟังก์ชันสร้าง System Prompt แบบไดนามิก พร้อมรองรับ Cross-Run Semantic Deduplication
+function getSystemPrompt(recentHeadlines = []) {
+  let crossRunDeduplicationSection = "";
+  if (recentHeadlines && recentHeadlines.length > 0) {
+    crossRunDeduplicationSection = `
+# PREVIOUSLY REPORTED NEWS (CROSS-RUN DEDUPLICATION):
+The following news stories have ALREADY been reported in previous runs within the last 24-48 hours:
+${recentHeadlines.slice(-60).map(h => `- ${h}`).join("\n")}
+
+CRITICAL CROSS-RUN RULE:
+- Do NOT extract any candidate news that covers the exact same event, policy announcement, press release, or situation as any of the previously reported news stories above. Even if reported by a different publisher or with different wording, if the underlying event is the same, DISCARD IT.
+`;
+  }
+
   return `
 You are a professional agricultural data extraction assistant.
 Your job is to analyze the provided list of Thai news articles and extract news related to specific agricultural products and themes.
@@ -564,28 +667,33 @@ ${TARGET_THEMES.map(t => `- ${t}`).join("\n")}
 # Rules for Selection:
 1. ONLY extract news that matches at least one of the Target Agricultural Products AND covers at least one of the Target Themes.
 2. STRICT EXCLUSIONS:
+   - EXCLUDE any news about "ข้าวแกง" (curry and rice), cooked meals, street food, restaurant food prices, meal subsidies, fast food, or buffets. The keyword "ข้าว" ONLY refers to agricultural commodities (paddy, milled rice, brown rice, planting, harvesting, agricultural trade, and supply chain).
+   - EXCLUDE aquaculture, fishery, shrimp (กุ้ง), fish, crabs, or livestock farming UNLESS the article specifically and directly focuses on "Animal Feed Ingredients" (วัตถุดิบอาหารสัตว์ / รำข้าว / ข้าวโพดเลี้ยงสัตว์). Flooding of shrimp ponds or fishery complaints are strictly excluded.
    - EXCLUDE local charity, merit-making (ทำบุญ/ทำทาน), Buddhist ceremony sponsorships (เช่น วางศิลาฤกษ์, ทอดกฐิน, งานบวช), local community donations, private foundation handouts, or politician CSR/local public relations events where rice/agricultural products are given out as small-scale gifts or alms.
-   - EXCLUDE general restaurant food prices, cooking recipes, general politics, or unrelated economic gossip.
+   - EXCLUDE general politics, crime news, traffic accidents in farming areas, or unrelated economic gossip.
 3. ALLOWED EXCEPTIONS:
    - ALLOW government-to-government (G2G) trade/grants, bilateral/multilateral official humanitarian aid (เช่น รัฐบาลไทยส่งข้าวสารช่วยเหลือผู้ประสบภัยระดับประเทศหรือประเทศเพื่อนบ้าน เช่น สปป.ลาว), or official national-level agricultural emergency relief programs.
-4. SEMANTIC DEDUPLICATION:
-   - If multiple candidate articles discuss the exact same event, announcement, policy, or press release (even if they are from different news sources or have slightly different headlines), you MUST choose only ONE representative article (preferably the one from the most reputable or detailed source, or the primary official announcer) and completely discard the other duplicate articles. Do not output multiple records for the same news event.
+4. SEMANTIC DEDUPLICATION (WITHIN CURRENT BATCH):
+   - If multiple candidate articles discuss the exact same event, announcement, policy, or press release (even if they are from different news sources or have slightly different headlines), you MUST choose only ONE representative article (preferably the one from the most reputable or detailed source, or the primary official announcer) and completely discard the other duplicate articles.
+${crossRunDeduplicationSection}
 5. If no articles match the criteria, return an empty array [].
 
 # Extraction Fields Schema:
-For each relevant news article, extract and translate the fields as follows:
-1. publish_date: The date the news was published in the format YYYY-MM-DD.
-2. category: Choose one of "ราคาและการค้า", "นโยบายรัฐ", "คู่แข่งและตลาดโลก", "สภาพภูมิอากาศและผลผลิต"
-3. source: The news source name in Thai (e.g. ผู้จัดการออนไลน์, ไทยรัฐ, แนวหน้า, โพสต์ทูเดย์, ฐานเศรษฐกิจ, กรุงเทพธุรกิจ, มติชน, ประชาชาติธุรกิจ)
-4. headline: Headline of the news story translated to Thai
-5. summary: A concise summary of the story in Thai (4-5 lines) containing key details
-6. metrics: Key numbers/metrics mentioned in the story (e.g., price per ton, export quantities, budget amount) or "ไม่มี" if none
-7. impact: Choose one of "High", "Medium", "Low" based on the impact on Thai agricultural exporters
-8. url: The URL link associated with the story.
+For each relevant news article, extract and return:
+1. ref_id: (integer) The exact "ref_id" value provided in the candidate input item. MUST match the input item.
+2. publish_date: The date the news was published in the format YYYY-MM-DD.
+3. category: Choose one of "ราคาและการค้า", "นโยบายรัฐ", "คู่แข่งและตลาดโลก", "สภาพภูมิอากาศและผลผลิต"
+4. source: The news source name in Thai (e.g. ผู้จัดการออนไลน์, ไทยรัฐ, แนวหน้า, โพสต์ทูเดย์, ฐานเศรษฐกิจ, กรุงเทพธุรกิจ, มติชน, ประชาชาติธุรกิจ)
+5. headline: Headline of the news story translated or polished in Thai
+6. summary: A concise summary of the story in Thai (3-4 lines) containing key facts
+7. metrics: Key numbers/metrics mentioned in the story (e.g., price per ton, export quantities, budget amount) or "ไม่มี" if none
+8. impact: Choose one of "High", "Medium", "Low" based on the impact on Thai agricultural exporters
+9. url: The URL link associated with the story.
 
 You must output ONLY a valid JSON array matching the schema:
 [
   {
+    "ref_id": 0,
     "publish_date": "string",
     "category": "string",
     "source": "string",
@@ -602,12 +710,12 @@ You must output ONLY a valid JSON array matching the schema:
 // ==========================================
 // 3. ส่วนเชื่อมโยงไปยังโมเดลการวิเคราะห์ Gemini API
 // ==========================================
-function parseCandidatesWithGemini(candidates, apiKey) {
+function parseCandidatesWithGemini(candidates, apiKey, recentHeadlines = []) {
   const p = PropertiesService.getScriptProperties();
   const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-1.5-flash"; // gemini-1.5-flash หรือ gemini-2.5-flash
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
   
-  const systemPrompt = getSystemPrompt();
+  const systemPrompt = getSystemPrompt(recentHeadlines);
 
   const payload = {
     contents: [
@@ -619,7 +727,32 @@ function parseCandidatesWithGemini(candidates, apiKey) {
       }
     ],
     generationConfig: {
-      responseMimeType: "application/json"
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "ARRAY",
+        description: "List of relevant agricultural news items",
+        items: {
+          type: "OBJECT",
+          properties: {
+            ref_id: { type: "INTEGER" },
+            publish_date: { type: "STRING" },
+            category: { 
+              type: "STRING", 
+              enum: ["ราคาและการค้า", "นโยบายรัฐ", "คู่แข่งและตลาดโลก", "สภาพภูมิอากาศและผลผลิต"] 
+            },
+            source: { type: "STRING" },
+            headline: { type: "STRING" },
+            summary: { type: "STRING" },
+            metrics: { type: "STRING" },
+            impact: { 
+              type: "STRING", 
+              enum: ["High", "Medium", "Low"] 
+            },
+            url: { type: "STRING" }
+          },
+          required: ["ref_id", "publish_date", "category", "source", "headline", "summary", "metrics", "impact", "url"]
+        }
+      }
     }
   };
 
@@ -645,12 +778,11 @@ function parseCandidatesWithGemini(candidates, apiKey) {
 }
 
 // ==========================================
-// 4. บันทึกผลลัพธ์ลงในชีตชื่อ "RSS" และตรวจสอบข่าวซ้ำ
+// 4. บันทึกผลลัพธ์ลงในชีตชื่อ "RSS" และตรวจสอบข่าวซ้ำ (Batch Write)
 // ==========================================
 function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
   const p = PropertiesService.getScriptProperties();
   const sheetId = p.getProperty(PROP_SHEET_ID);
-  // ตั้งค่าให้ชีตเริ่มต้นเป็นชื่อ "RSS" ตามต้องการ
   const sheetName = p.getProperty(PROP_SHEET_NAME) || "RSS";
   
   let sheet = sheetObj;
@@ -699,8 +831,9 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
   
   const timestamp = new Date();
   const newItems = [];
+  const rowsToAdd = [];
   
-  // 2. เปรียบเทียบข้อมูลและบันทึกข้อมูลข่าวใหม่
+  // 2. เปรียบเทียบข้อมูลและรวบรวมแถวข่าวใหม่
   jsonArray.forEach(news => {
     const urlKey = (news.url || "").toString().trim().toLowerCase();
     const headlineKey = (news.headline || "").toString().trim().toLowerCase();
@@ -717,7 +850,7 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
     }
     
     if (!isDuplicate) {
-      sheet.appendRow([
+      rowsToAdd.push([
         timestamp,
         news.publish_date || "ไม่ระบุวันเผยแพร่",
         news.category || "ราคาและการค้า",
@@ -737,30 +870,56 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
     }
   });
   
-  Logger.log(`Saved ${newItems.length} new news items to Google Sheet.`);
+  // 3. เขียนข้อมูลลง Google Sheet แบบชุดเดียว (Batch Write) ประหยัด I/O และทำงานเร็วขึ้น
+  if (rowsToAdd.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, 9).setValues(rowsToAdd);
+    Logger.log(`Batch saved ${rowsToAdd.length} new news items to Google Sheet.`);
+  }
+  
   return newItems;
 }
 
-// ดึงข้อมูลข่าวในชีตที่เคยบันทึกไว้ เพื่อใช้ตรวจสอบความซ้ำซ้อนล่วงหน้า (Pre-Deduplication)
+// ดึงข้อมูลข่าวในชีตที่เคยบันทึกไว้ เพื่อใช้ทำ Pre-Deduplication และ Cross-Run Semantic Deduplication
 function getExistingNewsKeys(sheet) {
   const lastRow = sheet.getLastRow();
   const existingUrls = new Set();
   const existingHeadlines = new Set();
+  const recentHeadlines = [];
   
   if (lastRow > 1) { // แถวแรกเป็น Header
     const data = sheet.getRange(1, 1, lastRow, 9).getValues();
+    const now = new Date().getTime();
+    const msIn48Hours = 48 * 60 * 60 * 1000;
+    
     for (let i = 1; i < data.length; i++) {
-      const headline = data[i][4]; // คอลัมน์ E (Headline)
-      const url = data[i][8];      // คอลัมน์ I (URL)
+      const timestampVal = data[i][0]; // คอลัมน์ A (Timestamp)
+      const headline = data[i][4];     // คอลัมน์ E (Headline)
+      const url = data[i][8];          // คอลัมน์ I (URL)
+      
       if (url) {
         existingUrls.add(url.toString().trim().toLowerCase());
       }
       if (headline) {
-        existingHeadlines.add(headline.toString().trim().toLowerCase());
+        const headlineStr = headline.toString().trim();
+        existingHeadlines.add(headlineStr.toLowerCase());
+        
+        // รวบรวมรายการพาดหัวข่าวในรอบ 48 ชม. ล่าสุด เพื่อส่งให้ AI ทำ Cross-run Deduplication
+        let isRecent = false;
+        if (timestampVal instanceof Date && !isNaN(timestampVal.getTime())) {
+          if (now - timestampVal.getTime() <= msIn48Hours) {
+            isRecent = true;
+          }
+        } else if (i >= data.length - 50) { // Fallback กรณี timestamp ไม่ใช่ Date ให้เก็บ 50 ข่าวล่าสุด
+          isRecent = true;
+        }
+        
+        if (isRecent && headlineStr) {
+          recentHeadlines.push(headlineStr);
+        }
       }
     }
   }
-  return { existingUrls, existingHeadlines };
+  return { existingUrls, existingHeadlines, recentHeadlines };
 }
 
 // ==========================================
@@ -789,16 +948,16 @@ function sendEmailNotification(newItems, docUrl) {
     htmlBody += `
       <div style="margin-bottom: 25px; padding: 15px; border-left: 4px solid #4caf50; background-color: #ffffff; border-radius: 0 4px 4px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
         <span style="display: inline-block; background-color: #e8f5e9; color: #2e7d32; font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 4px; margin-bottom: 8px;">
-          \${item.category || "ราคาและการค้า"}
+          ${item.category || "ราคาและการค้า"}
         </span>
         <span style="font-size: 12px; color: #777; margin-left: 10px;">
-          แหล่งข่าว: <strong>\${item.source || "ไม่ระบุแหล่งข่าว"}</strong> | เผยแพร่: \${item.publish_date || "ไม่ระบุวันเผยแพร่"}
+          แหล่งข่าว: <strong>${item.source || "ไม่ระบุแหล่งข่าว"}</strong> | เผยแพร่: ${item.publish_date || "ไม่ระบุวันเผยแพร่"}
         </span>
-        <h3 style="margin: 8px 0; color: #111; font-size: 16px;">\${idx + 1}. \${item.headline || "ไม่มีหัวข้อข่าว"}</h3>
-        <p style="margin: 8px 0; color: #444; font-size: 14px;">\${item.summary || "ไม่มีสรุปเนื้อหา"}</p>
-        \${item.metrics && item.metrics !== "ไม่มี" ? \`<p style="margin: 8px 0; color: #e65100; font-size: 13px;">📊 <strong>ตัวเลขสำคัญ:</strong> \${item.metrics}</p>\` : ''}
-        <p style="margin: 8px 0; font-size: 13px;">🎯 <strong>ผลกระทบต่อผู้ส่งออกไทย:</strong> <span style="font-weight: bold; color: \${item.impact === 'High' ? '#d32f2f' : (item.impact === 'Medium' ? '#f57c00' : '#388e3c')}">\${item.impact || 'Low'}</span></p>
-        \${item.url ? \`<p style="margin: 10px 0 0 0; font-size: 13px;"><a href="\${item.url}" target="_blank" style="color: #1976d2; text-decoration: none; font-weight: bold;">🔗 อ่านข่าวต้นฉบับ</a></p>\` : ''}
+        <h3 style="margin: 8px 0; color: #111; font-size: 16px;">${idx + 1}. ${item.headline || "ไม่มีหัวข้อข่าว"}</h3>
+        <p style="margin: 8px 0; color: #444; font-size: 14px;">${item.summary || "ไม่มีสรุปเนื้อหา"}</p>
+        ${item.metrics && item.metrics !== "ไม่มี" ? `<p style="margin: 8px 0; color: #e65100; font-size: 13px;">📊 <strong>ตัวเลขสำคัญ:</strong> ${item.metrics}</p>` : ''}
+        <p style="margin: 8px 0; font-size: 13px;">🎯 <strong>ผลกระทบต่อผู้ส่งออกไทย:</strong> <span style="font-weight: bold; color: ${item.impact === 'High' ? '#d32f2f' : (item.impact === 'Medium' ? '#f57c00' : '#388e3c')}">${item.impact || 'Low'}</span></p>
+        ${item.url ? `<p style="margin: 10px 0 0 0; font-size: 13px;"><a href="${item.url}" target="_blank" style="color: #1976d2; text-decoration: none; font-weight: bold;">🔗 อ่านข่าวต้นฉบับ</a></p>` : ''}
       </div>
     `;
   });
@@ -924,7 +1083,7 @@ function sendTeamsNotification(newItems, docUrl) {
 }
 
 // ==========================================
-// 7. ระบบจัดทำเล่มรายงานข่าวสรุปรายวันบน Google Doc
+// 7. ระบบจัดทำเล่มรายงานข่าวสรุปรายวันบน Google Doc (Clean Layout ตามตัวอย่าง R_261015.doc)
 // ==========================================
 
 // ค้นหาหรือสร้างโฟลเดอร์เก็บรายงาน และสร้างหรือเปิดไฟล์ Google Doc ประจำวันสำหรับ Append ข้อมูลข่าว
@@ -984,7 +1143,7 @@ function getOrCreateDailyDoc(folderId) {
   }
 }
 
-// สกัดภาพหน้าปก / อินโฟกราฟิกหลักผ่าน og:image tag โดยรับ HTML ดิบโดยตรงเพื่อลด Overhead
+// สกัดภาพหน้าปก / อินโฟกราฟิกหลักผ่าน og:image tag พร้อมแปลงภาพ WebP เป็น JPG ผ่าน CDN Proxy
 function fetchFeaturedImage(html, url) {
   try {
     let htmlContent = html;
@@ -993,33 +1152,39 @@ function fetchFeaturedImage(html, url) {
     }
     if (!htmlContent) return null;
     
-    // ใช้ Regex ที่ยืดหยุ่นเพื่อค้นหาแท็ก og:image ใน HTML ของบทความ (รองรับทั้งแบบ property ขึ้นก่อน หรือ content ขึ้นก่อน)
+    // ใช้ Regex ค้นหาแท็ก og:image ใน HTML ของบทความ
     let imageUrl = null;
     const match1 = htmlContent.match(/meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
     const match2 = htmlContent.match(/meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i);
     
     if (match1 && match1[1]) {
-      imageUrl = match1[1].trim();
+      imageUrl = match1[1].trim().replace(/&amp;/g, "&");
     } else if (match2 && match2[1]) {
-      imageUrl = match2[1].trim();
+      imageUrl = match2[1].trim().replace(/&amp;/g, "&");
     }
     
     if (imageUrl) {
+      let finalImageUrl = imageUrl;
       const lowerUrl = imageUrl.toLowerCase();
-      // เช็คเบื้องต้นจากนามสกุลไฟล์หรือพารามิเตอร์ของ URL
-      if (lowerUrl.indexOf(".webp") !== -1 || lowerUrl.indexOf("format=webp") !== -1) {
-        Logger.log("Skipping WebP image (unsupported by Google Docs): " + imageUrl);
-        return null;
+      
+      // แปลงไฟล์ WebP ผ่าน Image Proxy ฟรี (wsrv.nl) ให้เป็น JPEG เพื่อให้ Google Docs รองรับ
+      if (lowerUrl.includes(".webp") || lowerUrl.includes("format=webp")) {
+        finalImageUrl = `https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}&output=jpg`;
       }
       
-      Logger.log("Found og:image URL: " + imageUrl);
-      const response = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true });
+      Logger.log("Fetching featured image from: " + finalImageUrl);
+      const response = UrlFetchApp.fetch(finalImageUrl, { muteHttpExceptions: true });
       if (response.getResponseCode() === 200) {
         const blob = response.getBlob();
-        const contentType = blob.getContentType() || "";
-        // ตรวจสอบ Content-Type จาก HTTP response header เผื่อบางไฟล์ไม่มีนามสกุลใน URL
-        if (contentType.toLowerCase().indexOf("webp") !== -1) {
-          Logger.log("Skipping WebP image based on Content-Type header: " + imageUrl);
+        const contentType = (blob.getContentType() || "").toLowerCase();
+        
+        // หาก Content-Type ยังเป็น webp อยู่ (กรณี URL ไม่มีนามสกุล .webp) ให้แปลงผ่าน wsrv.nl
+        if (contentType.includes("webp")) {
+          const fallbackUrl = `https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}&output=jpg`;
+          const fallbackResp = UrlFetchApp.fetch(fallbackUrl, { muteHttpExceptions: true });
+          if (fallbackResp.getResponseCode() === 200) {
+            return fallbackResp.getBlob();
+          }
           return null;
         }
         return blob;
@@ -1031,32 +1196,38 @@ function fetchFeaturedImage(html, url) {
   return null;
 }
 
-// ทำความสะอาด HTML ดิบโดยตัด script/style ออกเพื่อลดจำนวน Token ก่อนส่งให้ AI
+// ทำความสะอาด HTML ดิบโดยลบแท็กโครงสร้างเว็บไซต์และสคริปต์ออกทั้งหมด ก่อนตัดความยาว
 function cleanHtmlForAI(html) {
   if (!html) return "";
   let text = html;
   
-  // ลบแท็ก script และ style ทั้งหมด
-  text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
-  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+  // 1. ลบส่วนที่ไม่ใช่เนื้อหาข่าวออกทั้งหมด (script, style, svg, nav, header, footer, aside, noscript, iframe, form)
+  text = text.replace(/<(script|style|svg|nav|header|footer|aside|noscript|iframe|form)[^>]*>[\s\S]*?<\/\1>/gi, "");
   
-  // สกัดเอาเฉพาะเนื้อความภายในแท็ก body
+  // 2. สกัดเอาเฉพาะใน body (ถ้ามี)
   const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   if (bodyMatch) {
     text = bodyMatch[1];
   }
   
-  // ล้างช่องว่างที่มากเกินความจำเป็น
-  text = text.replace(/\s+/g, " ").trim();
+  // 3. แปลง closing tag ของย่อหน้า/บล็อก ให้เป็นขึ้นบรรทัดใหม่ แล้วลบ HTML Tags ทั้งหมดให้เหลือแต่ข้อความล้วน
+  text = text.replace(/<\/(p|div|h[1-6]|li|br)>/gi, "\n");
+  text = text.replace(/<[^>]+>/g, " ");
   
-  // ตัดเนื้อหาไว้สูงสุดที่ 50,000 อักษรเพื่อเซฟความเร็วและ Token ของโมเดล
-  if (text.length > 50000) {
-    text = text.substring(0, 50000);
+  // 4. ล้างช่องว่างและบรรทัดว่างที่ซ้ำซ้อน
+  text = text
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n/g, "\n")
+    .trim();
+  
+  // 5. ตัดความยาวหลังคลีนแล้ว (ได้เนื้อหาข่าวล้วนๆ ไม่ติดโค้ดขยะ)
+  if (text.length > 40000) {
+    text = text.substring(0, 40000);
   }
   return text;
 }
 
-// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini ทำการสกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์ (รองรับการรับ HTML ดิบโดยตรงเพื่อเลี่ยงโหลดซ้ำ)
+// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini ทำการสกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์
 function fetchFullContentWithGemini(htmlOrUrl, apiKey, urlForLog) {
   try {
     let rawHtml = htmlOrUrl;
@@ -1117,53 +1288,65 @@ Rules:
   return "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้";
 }
 
-// นำข่าว สรุปย่อ ภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกต่อท้าย (Append) ในเล่ม Google Doc
+// นำข่าว สรุปย่อ ภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc (คลีนตามแบบ R_261015.doc)
 function appendNewsToDoc(doc, item, fullText, imageBlob) {
   const body = doc.getBody();
   
-  // 1. หัวข้อข่าวหลัก (Heading 2)
-  const headingText = `${item.source || "ไม่ระบุแหล่งข่าว"} - ${item.headline || "ไม่มีหัวข้อข่าว"}`;
-  const heading = body.appendParagraph(headingText);
+  // 1. หัวข้อข่าวหลัก (Font: Cordia New, Size: 16, Bold)
+  const heading = body.appendParagraph(item.headline || "ไม่มีหัวข้อข่าว");
   heading.setHeading(DocumentApp.ParagraphHeading.HEADING2);
   styleParagraph(heading, "Cordia New", 16, "#000000", true, false);
-  heading.setSpacingBefore(12);
+  heading.setSpacingBefore(14);
+  heading.setSpacingAfter(6);
   
-  // 2. ข้อมูลสถิติของข่าว (Meta data)
-  const metaText = `📅 วันที่เผยแพร่: ${item.publish_date || "ไม่ระบุ"} | 📁 หมวดหมู่: ${item.category || "ราคาและการค้า"} | 🎯 ผลกระทบ: ${item.impact || "Low"}\n🔗 ลิงก์ข่าวต้นฉบับ: ${item.url || "ไม่มี"}`;
-  const metaParagraph = body.appendParagraph(metaText);
-  styleParagraph(metaParagraph, "Cordia New", 14, "#000000", false, false);
-  metaParagraph.setSpacingAfter(6);
-  
-  // 3. บทวิเคราะห์ย่อโดย AI
-  const summaryHeading = body.appendParagraph("📝 สรุปย่อโดย AI:");
-  styleParagraph(summaryHeading, "Cordia New", 14, "#000000", true, false);
-  
-  const summaryParagraph = body.appendParagraph(item.summary || "ไม่มีสรุปเนื้อหา");
-  styleParagraph(summaryParagraph, "Cordia New", 14, "#000000", false, false);
-  summaryParagraph.setSpacingAfter(6);
+  // 2. สรุปย่อโดย AI (คลีนๆ ไม่ใส่ icon ตามที่ผู้ใช้ระบุ)
+  if (item.summary && item.summary !== "ไม่มีสรุปเนื้อหา") {
+    const summaryHeading = body.appendParagraph("สรุปสาระสำคัญโดย AI:");
+    styleParagraph(summaryHeading, "Cordia New", 14, "#000000", true, false);
+    summaryHeading.setSpacingBefore(4);
+    summaryHeading.setSpacingAfter(2);
+
+    const summaryParagraph = body.appendParagraph(item.summary);
+    styleParagraph(summaryParagraph, "Cordia New", 14, "#333333", false, false);
+    summaryParagraph.setSpacingAfter(4);
+  }
   
   if (item.metrics && item.metrics !== "ไม่มี") {
-    const metricsParagraph = body.appendParagraph(`📊 ตัวเลข/สถิติสำคัญ: ${item.metrics}`);
+    const metricsParagraph = body.appendParagraph(`ตัวเลขและสถิติสำคัญ: ${item.metrics}`);
     styleParagraph(metricsParagraph, "Cordia New", 14, "#000000", true, false);
     metricsParagraph.setSpacingAfter(6);
   }
   
-  // 4. บทความข่าวฉบับเต็ม
-  const fullTextHeading = body.appendParagraph("📰 เนื้อหาข่าวฉบับเต็ม:");
-  styleParagraph(fullTextHeading, "Cordia New", 14, "#000000", true, false);
+  // 3. บทความข่าวฉบับเต็ม จัดแยกเป็นย่อหน้าคลีนๆ (Cordia New, Size: 14)
+  if (fullText && fullText !== "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้") {
+    const paragraphs = fullText.split("\n").map(p => p.trim()).filter(p => p.length > 0);
+    paragraphs.forEach(para => {
+      // ตรวจสอบว่าพารากราฟเป็นหัวข้อย่อยหรือไม่ (เช่นขึ้นต้นด้วย ** หรือสั้นและเป็นหัวข้อ)
+      const isSubheading = (para.startsWith("**") && para.endsWith("**")) || 
+                           (para.startsWith("###") || para.startsWith("##"));
+      const cleanPara = para.replace(/^[*#\s]+|[*#\s]+$/g, "").trim();
+      if (cleanPara) {
+        const pElem = body.appendParagraph(cleanPara);
+        if (isSubheading) {
+          styleParagraph(pElem, "Cordia New", 14, "#000000", true, false);
+          pElem.setSpacingBefore(6);
+          pElem.setSpacingAfter(3);
+        } else {
+          styleParagraph(pElem, "Cordia New", 14, "#000000", false, false);
+          pElem.setSpacingAfter(4);
+        }
+      }
+    });
+  } else {
+    const fallbackPara = body.appendParagraph(item.summary || "ไม่สามารถแสดงรายละเอียดข่าวฉบับเต็มได้");
+    styleParagraph(fallbackPara, "Cordia New", 14, "#000000", false, false);
+    fallbackPara.setSpacingAfter(6);
+  }
   
-  const fullTextParagraph = body.appendParagraph(fullText);
-  styleParagraph(fullTextParagraph, "Cordia New", 14, "#000000", false, false);
-  fullTextParagraph.setSpacingAfter(10);
-  
-  // 5. แทรกรูปภาพประกอบ (หากโหลดภาพสำเร็จ)
+  // 4. แทรกรูปภาพประกอบ (หากโหลดภาพสำเร็จ - ไม่ใส่หัวข้อไอคอนให้รกตา)
   if (imageBlob) {
     try {
-      const imgHeading = body.appendParagraph("📸 ภาพประกอบข่าว:");
-      styleParagraph(imgHeading, "Cordia New", 14, "#000000", true, false);
-      
       const image = body.appendImage(imageBlob);
-      // จำกัดความกว้างไม่ให้ล้นหน้าขอบกระดาษ Word/Google Doc
       const originalWidth = image.getWidth();
       const originalHeight = image.getHeight();
       const maxWidth = 450;
@@ -1173,15 +1356,36 @@ function appendNewsToDoc(doc, item, fullText, imageBlob) {
         image.setHeight(originalHeight * ratio);
       }
     } catch (e) {
-      Logger.log("WARNING: ไม่สามารถเขียนแทรกรูปภาพประกอบลงใน Google Doc ได้. Error: " + e.toString());
+      Logger.log("WARNING: ไม่สามารถแทรกรูปภาพประกอบลงใน Google Doc ได้: " + e.toString());
     }
+  }
+  
+  // 5. Source และ URL ใต้เนื้อหาข่าว คลีนแบบ R_261015.doc (เพิ่ม URL อีกบรรทัดใต้ Source)
+  const sourceName = item.source || "ไม่ระบุ";
+  const sourcePrefix = (!sourceName.startsWith("หนังสือพิมพ์") && !sourceName.startsWith("สำนักข่าว") && !sourceName.includes("ออนไลน์")) ? "หนังสือพิมพ์ " : "";
+  const sourceText = `Source: ${sourcePrefix}${sourceName} วันที่ ${item.publish_date || "ไม่ระบุ"}`;
+  
+  const sourceParagraph = body.appendParagraph(sourceText);
+  styleParagraph(sourceParagraph, "Cordia New", 14, "#000000", false, false);
+  sourceParagraph.setSpacingBefore(8);
+  sourceParagraph.setSpacingAfter(2);
+  
+  if (item.url) {
+    const urlParagraph = body.appendParagraph(`URL: ${item.url}`);
+    styleParagraph(urlParagraph, "Cordia New", 14, "#1976d2", false, false);
+    try {
+      urlParagraph.setLinkUrl(item.url);
+    } catch (linkErr) {
+      // Fallback
+    }
+    urlParagraph.setSpacingAfter(10);
   }
   
   // 6. เส้นคั่นระหว่างข่าว
   body.appendHorizontalRule();
 }
 
-// ฟังก์ชันเสริมสำหรับกำหนดรูปแบบข้อความ (Font, Size, Color, Weight, Style) ป้องกันบั๊กการสืบทอดสีและรูปแบบอักษร
+// ฟังก์ชันเสริมสำหรับกำหนดรูปแบบข้อความ (Font, Size, Color, Weight, Style)
 function styleParagraph(p, fontFamily, fontSize, color, isBold, isItalic) {
   p.setFontFamily(fontFamily || "Cordia New");
   p.setFontSize(fontSize || 14);
