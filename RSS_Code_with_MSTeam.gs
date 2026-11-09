@@ -81,6 +81,21 @@ function startRssNewsAgent(e) {
     }
   }
   
+  // เตรียม Google Sheet และ Folder ID สำหรับบันทึกข้อมูลและรายงาน
+  let sheet;
+  const sheetId = p.getProperty(PROP_SHEET_ID);
+  const sheetName = p.getProperty(PROP_SHEET_NAME) || "RSS";
+  const folderId = p.getProperty(PROP_DRIVE_FOLDER);
+  try {
+    if (sheetId) {
+      sheet = SpreadsheetApp.openById(sheetId).getSheetByName(sheetName);
+    } else {
+      sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    }
+  } catch (sheetErr) {
+    Logger.log("WARNING: ไม่สามารถเปิด Google Sheet ได้: " + sheetErr.toString());
+  }
+
   // รายการสำนักข่าวเป้าหมาย (รวมทั้งสิ้น 8 สำนักข่าวตามเอกสาร README)
   const feeds = [
     { name: "ผู้จัดการออนไลน์", url: "https://mgronline.com/store/rss/index.xml", type: "rss" },
@@ -99,7 +114,7 @@ function startRssNewsAgent(e) {
   feeds.forEach(feed => {
     try {
       Logger.log(`Fetching feed: ${feed.name} (${feed.url})...`);
-      const xmlString = fetchXml(feed.url);
+      const xmlString = fetchXml(feed.url, true);
       
       let parsed = [];
       if (feed.type === "rss") {
@@ -119,7 +134,8 @@ function startRssNewsAgent(e) {
   });
   
   if (allArticles.length === 0) {
-    Logger.log("No articles retrieved from any feeds.");
+    Logger.log("No articles retrieved from any feeds. Checking for pending doc queue...");
+    if (sheet) processPendingDocQueue(sheet, apiKey, folderId);
     return;
   }
   
@@ -128,24 +144,12 @@ function startRssNewsAgent(e) {
   Logger.log(`Articles published in the last 24 hours: ${currentArticles.length} items.`);
   
   if (currentArticles.length === 0) {
-    Logger.log("No articles published in the last 24 hours.");
+    Logger.log("No articles published in the last 24 hours. Checking for pending doc queue...");
+    if (sheet) processPendingDocQueue(sheet, apiKey, folderId);
     return;
   }
   
   // 2. ดึงประวัติเพื่อทำ Pre-Deduplication (กรองออกล่วงหน้าก่อนประมวลผลคำค้นหาและส่งให้ AI)
-  let sheet;
-  const sheetId = p.getProperty(PROP_SHEET_ID);
-  const sheetName = p.getProperty(PROP_SHEET_NAME) || "RSS";
-  try {
-    if (sheetId) {
-      sheet = SpreadsheetApp.openById(sheetId).getSheetByName(sheetName);
-    } else {
-      sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
-    }
-  } catch (sheetErr) {
-    Logger.log("WARNING: ไม่สามารถเปิด Google Sheet ได้สำหรับ Pre-Deduplication: " + sheetErr.toString());
-  }
-
   let uniqueArticles = currentArticles;
   let existingKeys = null;
   if (sheet) {
@@ -162,7 +166,8 @@ function startRssNewsAgent(e) {
   }
 
   if (uniqueArticles.length === 0) {
-    Logger.log("All articles in this run are already processed in the history.");
+    Logger.log("All articles in this run are already processed in the history. Checking for pending doc queue...");
+    if (sheet) processPendingDocQueue(sheet, apiKey, folderId);
     return;
   }
   
@@ -171,7 +176,8 @@ function startRssNewsAgent(e) {
   Logger.log(`Candidate articles after keyword filtering: ${candidates.length} items.`);
   
   if (candidates.length === 0) {
-    Logger.log("No new agricultural or rice crop candidate news found after keyword filtering.");
+    Logger.log("No new agricultural candidate news found after keyword filtering. Checking for pending doc queue...");
+    if (sheet) processPendingDocQueue(sheet, apiKey, folderId);
     return;
   }
 
@@ -191,15 +197,13 @@ function startRssNewsAgent(e) {
     const recentHeadlines = existingKeys ? (existingKeys.recentHeadlines || []) : [];
     const jsonArray = parseCandidatesWithGemini(candidatesWithId, apiKey, recentHeadlines);
     
-    // ดึงเวลาเผยแพร่ข่าวและ URL ที่แท้จริงจากสำนักข่าวมาแทนที่ของ Gemini เพื่อความแม่นยำ 100%
+    // ดึงเวลาเผยแพร่ข่าวและ URL ที่แท้จริงจากสำนักข่าวต้นฉบับ เพื่อความแม่นยำ 100%
     if (jsonArray && jsonArray.length > 0) {
       jsonArray.forEach(newsItem => {
         let match = null;
-        // อ้างอิงผ่าน ref_id เป็นอันดับแรก
         if (typeof newsItem.ref_id === "number" && candidates[newsItem.ref_id]) {
           match = candidates[newsItem.ref_id];
         } else {
-          // Fallback matching เผื่อกรณี AI ไม่คืน ref_id
           const urlKey = (newsItem.url || "").toString().trim().toLowerCase();
           const headlineKey = (newsItem.headline || "").toString().trim().toLowerCase();
           match = candidates.find(c => {
@@ -210,10 +214,9 @@ function startRssNewsAgent(e) {
         }
         
         if (match) {
-          newsItem.url = match.link; // ใช้ URL ต้นฉบับเสมอ ป้องกัน URL ถูก AI ดัดแปลงหรือตัด query string
+          newsItem.url = match.link;
           newsItem.source = match.source || newsItem.source;
           if (match.pubDate) {
-            // ฟอร์แมตวันเวลาในเขตนครหลวงกรุงเทพฯ เช่น 2026-07-23 09:42 น.
             newsItem.publish_date = Utilities.formatDate(match.pubDate, "Asia/Bangkok", "yyyy-MM-dd HH:mm น.");
           } else {
             newsItem.publish_date = "ไม่ระบุวันเผยแพร่";
@@ -224,66 +227,13 @@ function startRssNewsAgent(e) {
       });
     }
     
-    // 5. บันทึกผลลัพธ์ลง Google Sheet แบบ Batch Append (ส่งผ่าน sheet และ keys เพื่อลด Overhead)
+    // 5. บันทึกผลลัพธ์ลง Google Sheet แบบ Batch Append (บันทึกสถานะ Pending เพื่อรอลง Doc)
     const newItems = saveJsonToSheet(jsonArray, sheet, existingKeys);
     
-    // 6. ประมวลผลคิวข่าวที่รอลง Google Doc (ดึงทั้งข่าวใหม่และข่าวตกค้างที่ยังค้างสถานะ Pending)
-    let pendingDocItems = [];
-    if (sheet) {
-      pendingDocItems = getPendingDocItems(sheet, 15); // ดึงสูงสุด 15 ข่าวต่อรอบ
-    } else if (newItems && newItems.length > 0) {
-      pendingDocItems = newItems.map(it => ({ ...it, rowNumber: null }));
-    }
-    
+    // 6. ประมวลผลคิวข่าวที่รอลง Google Doc (ดึงทั้งข่าวใหม่และข่าวตกค้างที่ค้างสถานะ Pending)
     let docUrl = "";
-    if (pendingDocItems.length > 0) {
-      try {
-        const folderId = p.getProperty(PROP_DRIVE_FOLDER);
-        const doc = getOrCreateDailyDoc(folderId);
-        
-        // กำหนดเวลาเริ่มทำงาน และจำกัดเวลาปลอดภัยที่ 4.5 นาที (เพื่อกัน Google Apps Script 6-Minute Limit)
-        const startTime = new Date().getTime();
-        const MAX_PROCESSING_TIME_MS = 4.5 * 60 * 1000;
-        
-        Logger.log(`Processing ${pendingDocItems.length} pending items into Google Doc...`);
-        
-        // ดึง HTML ของทุกข่าวพร้อมกันแบบคู่ขนาน (Parallel Fetch) ช่วยลดเวลาจากหลายนาทีเหลือ 2-3 วินาที
-        const targetUrls = pendingDocItems.map(it => it.url);
-        const htmlContents = fetchArticlesParallel(targetUrls);
-        
-        for (let i = 0; i < pendingDocItems.length; i++) {
-          const item = pendingDocItems[i];
-          if (new Date().getTime() - startTime > MAX_PROCESSING_TIME_MS) {
-            Logger.log(`WARNING: เวลาประมวลผลใกล้ถึงขีดจำกัด (4.5 นาที) ระบบจะปิดบันทึก Google Doc ทันที (ข่าวที่เหลือ ${pendingDocItems.length - i} ข่าวจะคงสถานะ Pending ไว้รอรอบถัดไป)`);
-            break;
-          }
-          
-          if (item.url) {
-            Logger.log(`Processing Google Doc content (${i + 1}/${pendingDocItems.length}) for: ${item.headline}`);
-            try {
-              const htmlContent = htmlContents[i];
-              const fullText = fetchFullContentWithGemini(htmlContent || item.url, apiKey, item.url);
-              appendNewsToDoc(doc, item, fullText);
-              
-              if (item.rowNumber && sheet) {
-                updateDocStatus(sheet, item.rowNumber, "Completed");
-              }
-            } catch (itemErr) {
-              Logger.log(`ERROR processing article for Doc (${item.headline}): ${itemErr.toString()}`);
-              if (item.rowNumber && sheet) {
-                updateDocStatus(sheet, item.rowNumber, "Error");
-              }
-            }
-          }
-        }
-        
-        // ดึงแชร์ลิงก์ของ Google Doc และปิดประมวลผลเซฟไฟล์
-        docUrl = doc.getUrl();
-        doc.saveAndClose();
-        Logger.log(`Successfully updated Daily Google Doc: ${docUrl}`);
-      } catch (docError) {
-        Logger.log("ERROR managing Google Doc daily report: " + docError.toString());
-      }
+    if (sheet) {
+      docUrl = processPendingDocQueue(sheet, apiKey, folderId, 15);
     }
     
     // 7. ส่งการแจ้งเตือนเฉพาะเมื่อมีข่าวใหม่ในรอบนี้ (พร้อมแนบลิงก์ Google Doc)
@@ -315,7 +265,7 @@ function fetchXml(url, isXml = true) {
   // ตรวจจับว่าต้องใช้ Proxy ทันทีหรือไม่ (เฉพาะประชาชาติธุรกิจและมติชนที่ติด Cloudflare / 403)
   const isBlockedSite = url.includes("matichon.co.th") || url.includes("prachachat.net");
   
-  // 1. สำหรับเว็บทั่วไปที่ไม่ติดบล็อก Cloudflare ให้ลองดึงตรงๆ หรือผ่าน Proxy ฟรี ก่อน
+  // 1. สำหรับเว็บทั่วไปที่ไม่ติดบล็อก Cloudflare ให้ลองดึงตรงๆ ก่อน
   if (!isBlockedSite) {
     try {
       const response = UrlFetchApp.fetch(url, {
@@ -330,32 +280,14 @@ function fetchXml(url, isXml = true) {
         const text = response.getContentText();
         return isXml ? sanitizeXmlEntities(text) : text;
       }
-      Logger.log(`Direct fetch for ${url} returned status ${response.getResponseCode()}. Trying free proxy...`);
+      Logger.log(`Direct fetch for ${url} returned status ${response.getResponseCode()}. Trying ScraperAPI proxy...`);
     } catch (e) {
-      Logger.log(`Direct fetch failed for ${url}: ${e.toString()}. Trying free proxy...`);
-    }
-    
-    // ลองผ่าน AllOrigins (Free Web Proxy) สำหรับเว็บทั่วไปที่เกิดปัญหาชั่วคราว
-    try {
-      const proxyUrl = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
-      const response = UrlFetchApp.fetch(proxyUrl, {
-        method: "get",
-        muteHttpExceptions: true
-      });
-      if (response.getResponseCode() === 200) {
-        const json = JSON.parse(response.getContentText());
-        if (json.contents) {
-          Logger.log(`Successfully fetched via AllOrigins Free Proxy for: ${url}`);
-          return isXml ? sanitizeXmlEntities(json.contents) : json.contents;
-        }
-      }
-    } catch (e) {
-      Logger.log(`AllOrigins proxy failed for ${url}: ${e.toString()}. Falling back to ScraperAPI...`);
+      Logger.log(`Direct fetch failed for ${url}: ${e.toString()}. Trying ScraperAPI proxy...`);
     }
   }
   
-  // 2. สำหรับเว็บที่ติด Cloudflare (เช่น ประชาชาติธุรกิจ, มติชน) หรือกรณีเว็บทั่วไปที่สองขั้นแรกล้มเหลว
-  // ให้วิ่งตรงเข้า ScraperAPI ทันที (รวดเร็ว และ Bypass Cloudflare ได้อย่างแน่นอน)
+  // 2. สำหรับเว็บที่ติด Cloudflare (เช่น ประชาชาติธุรกิจ, มติชน) หรือกรณีดึงตรงล้มเหลว
+  // ให้วิ่งตรงเข้า ScraperAPI ทันที (รวดเร็ว ปลอดภัย และ Bypass Cloudflare ได้อย่างแน่นอน)
   if (scraperApiKey) {
     try {
       const scraperUrl = "https://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url);
@@ -404,15 +336,26 @@ function fetchXml(url, isXml = true) {
 function fetchArticlesParallel(urls) {
   if (!urls || urls.length === 0) return [];
   
-  const reqs = urls.map(u => ({
-    url: u,
-    method: "get",
-    muteHttpExceptions: true,
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
-  }));
+  const p = PropertiesService.getScriptProperties();
+  const scraperApiKey = p.getProperty(PROP_SCRAPER_KEY);
+  
+  const reqs = urls.map(u => {
+    // หากเป็นเว็บที่ติดบล็อก Cloudflare แน่นอน (มติชน/ประชาชาติ) ให้เข้า ScraperAPI ตั้งแต่แรกในโหมด Parallel เลย
+    const isBlocked = u.includes("matichon.co.th") || u.includes("prachachat.net");
+    const targetUrl = (isBlocked && scraperApiKey) 
+      ? ("https://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(u))
+      : u;
+      
+    return {
+      url: targetUrl,
+      method: "get",
+      muteHttpExceptions: true,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      }
+    };
+  });
   
   try {
     const responses = UrlFetchApp.fetchAll(reqs);
@@ -420,7 +363,7 @@ function fetchArticlesParallel(urls) {
       if (resp && resp.getResponseCode() === 200) {
         return resp.getContentText();
       }
-      // หากดึงตรงแบบขนานไม่สำเร็จในบางเว็บ (เช่น ติดบล็อก) ให้ลองดึงเดี่ยวผ่าน fetchXml(..., false)
+      // หากดึงตรงแบบขนานไม่สำเร็จในบางเว็บ ให้ลองดึงเดี่ยวผ่าน fetchXml(..., false)
       try {
         return fetchXml(urls[i], false);
       } catch (err) {
@@ -1003,6 +946,70 @@ function updateDocStatus(sheet, rowNumber, status) {
   }
 }
 
+// ฟังก์ชันสำหรับประมวลผลคิวข่าวสถานะ "Pending" ลง Google Doc (พร้อมสกัดเนื้อหา ภาพกราฟิก และแปลง WebP)
+function processPendingDocQueue(sheet, apiKey, folderId, maxItems = 15) {
+  if (!sheet) return "";
+  
+  const pendingDocItems = getPendingDocItems(sheet, maxItems);
+  if (!pendingDocItems || pendingDocItems.length === 0) {
+    Logger.log("No pending news items waiting for Google Doc synthesis.");
+    return "";
+  }
+  
+  let docUrl = "";
+  try {
+    const doc = getOrCreateDailyDoc(folderId);
+    const startTime = new Date().getTime();
+    const MAX_PROCESSING_TIME_MS = 4.5 * 60 * 1000;
+    
+    Logger.log(`Processing ${pendingDocItems.length} pending items into Google Doc...`);
+    
+    // ดึง HTML ของทุกข่าวพร้อมกันแบบคู่ขนาน (Parallel Fetch)
+    const targetUrls = pendingDocItems.map(it => it.url);
+    const htmlContents = fetchArticlesParallel(targetUrls);
+    
+    for (let i = 0; i < pendingDocItems.length; i++) {
+      const item = pendingDocItems[i];
+      if (new Date().getTime() - startTime > MAX_PROCESSING_TIME_MS) {
+        Logger.log(`WARNING: เวลาประมวลผลใกล้ถึงขีดจำกัด (4.5 นาที) ระบบจะปิดบันทึก Google Doc ทันที (ข่าวที่เหลือ ${pendingDocItems.length - i} ข่าวจะคงสถานะ Pending ไว้รอรอบถัดไป)`);
+        break;
+      }
+      
+      if (item.url) {
+        Logger.log(`Processing Google Doc content (${i + 1}/${pendingDocItems.length}) for: ${item.headline}`);
+        try {
+          const htmlContent = htmlContents[i];
+          const aiResult = fetchFullContentWithGemini(htmlContent || item.url, apiKey, item.url);
+          const fullText = (typeof aiResult === "object" && aiResult.fullText) ? aiResult.fullText : aiResult;
+          const imageUrls = (typeof aiResult === "object" && Array.isArray(aiResult.imageUrls)) ? aiResult.imageUrls : [];
+          
+          // ดาวน์โหลดภาพประกอบ/อินโฟกราฟิก และแปลง WebP เป็น JPG ผ่าน wsrv.nl
+          const imageBlobs = fetchArticleImages(htmlContent, item.url, imageUrls);
+          
+          // แทรกลงใน Google Doc
+          appendNewsToDoc(doc, item, fullText, imageBlobs);
+          
+          if (item.rowNumber) {
+            updateDocStatus(sheet, item.rowNumber, "Completed");
+          }
+        } catch (itemErr) {
+          Logger.log(`ERROR processing article for Doc (${item.headline}): ${itemErr.toString()}`);
+          if (item.rowNumber) {
+            updateDocStatus(sheet, item.rowNumber, "Error");
+          }
+        }
+      }
+    }
+    
+    docUrl = doc.getUrl();
+    doc.saveAndClose();
+    Logger.log(`Successfully updated Daily Google Doc: ${docUrl}`);
+  } catch (docError) {
+    Logger.log("ERROR managing Google Doc daily report: " + docError.toString());
+  }
+  return docUrl;
+}
+
 // ดึงข้อมูลข่าวในชีตที่เคยบันทึกไว้ เพื่อใช้ทำ Pre-Deduplication และ Cross-Run Semantic Deduplication
 function getExistingNewsKeys(sheet) {
   const lastRow = sheet.getLastRow();
@@ -1271,8 +1278,8 @@ function getOrCreateDailyDoc(folderId) {
 }
 
 
-// ทำความสะอาด HTML ดิบโดยลบแท็กโครงสร้างเว็บไซต์และสคริปต์ออกทั้งหมด ก่อนตัดความยาว
-function cleanHtmlForAI(html) {
+// ทำความสะอาด HTML ดิบ และแปลงแท็ก <img> ที่มีประโยชน์ให้เป็น Marker [IMAGE_CANDIDATE] สำหรับส่งให้ AI คัดเลือก
+function cleanHtmlForAI(html, baseUrl) {
   if (!html) return "";
   let text = html;
   
@@ -1285,49 +1292,91 @@ function cleanHtmlForAI(html) {
     text = bodyMatch[1];
   }
   
-  // 3. แปลง closing tag ของย่อหน้า/บล็อก ให้เป็นขึ้นบรรทัดใหม่ แล้วลบ HTML Tags ทั้งหมดให้เหลือแต่ข้อความล้วน
-  text = text.replace(/<\/(p|div|h[1-6]|li|br)>/gi, "\n");
+  // หา Domain หลัก เผื่อแปลง Relative Image URL ให้เป็น Full Absolute URL
+  let origin = "";
+  if (baseUrl) {
+    const originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
+    if (originMatch) origin = originMatch[1];
+  }
+  
+  // 3. แปลงแท็ก <img> ให้เป็น Text Marker พร้อมดึงลิงก์จาก src, data-src, หรือ data-original (รองรับ Lazy Load)
+  text = text.replace(/<img\s+[^>]*>/gi, function(imgTag) {
+    // ข้ามรูปไอคอน โลโก้ แบนเนอร์ หรือตัวติดตามพิกเซล
+    if (/avatar|logo|icon|banner|ads?|pixel|button|share|emoji|author|profile|sprite|placeholder|loading/i.test(imgTag)) {
+      return "";
+    }
+    
+    const srcMatch = imgTag.match(/(?:data-src|data-original|data-lazy-src|src)=["']([^"']+)["']/i);
+    const altMatch = imgTag.match(/alt=["']([^"']*)["']/i);
+    
+    if (srcMatch && srcMatch[1]) {
+      let imgUrl = srcMatch[1].trim().replace(/&amp;/g, "&");
+      if (imgUrl.startsWith("data:image") || imgUrl.endsWith(".svg") || imgUrl.endsWith(".gif")) {
+        return "";
+      }
+      
+      // แปลง Relative URL เป็น Absolute URL
+      if (imgUrl.startsWith("//")) {
+        imgUrl = "https:" + imgUrl;
+      } else if (imgUrl.startsWith("/") && origin) {
+        imgUrl = origin + imgUrl;
+      }
+      
+      const altText = altMatch ? altMatch[1].trim() : "";
+      return `\n[IMAGE_CANDIDATE: ${imgUrl} | ALT: ${altText}]\n`;
+    }
+    return "";
+  });
+  
+  // 4. แปลง closing tag ของย่อหน้า/บล็อก ให้เป็นขึ้นบรรทัดใหม่ แล้วลบ HTML Tags อื่นๆ ทั้งหมด
+  text = text.replace(/<\/(p|div|h[1-6]|li|br|figure|figcaption)>/gi, "\n");
   text = text.replace(/<[^>]+>/g, " ");
   
-  // 4. ล้างช่องว่างและบรรทัดว่างที่ซ้ำซ้อน
+  // 5. ล้างช่องว่างและบรรทัดว่างที่ซ้ำซ้อน
   text = text
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n/g, "\n")
     .trim();
   
-  // 5. ตัดความยาวหลังคลีนแล้ว (ได้เนื้อหาข่าวล้วนๆ ไม่ติดโค้ดขยะ)
-  if (text.length > 40000) {
-    text = text.substring(0, 40000);
+  // 6. ตัดความยาวสูงสุดที่ 45,000 ตัวอักษร
+  if (text.length > 45000) {
+    text = text.substring(0, 45000);
   }
   return text;
 }
 
-// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini ทำการสกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์
+// ส่งเนื้อหาหน้าเว็บเต็มให้ Gemini สกัดเป็นบทความยาวภาษาไทยฉบับสมบูรณ์ พร้อมคัดเลือกภาพประกอบ/กราฟิก/ตาราง
 function fetchFullContentWithGemini(htmlOrUrl, apiKey, urlForLog) {
   try {
     let rawHtml = htmlOrUrl;
     if (htmlOrUrl && htmlOrUrl.toString().trim().indexOf("http") === 0) {
-      rawHtml = fetchXml(htmlOrUrl);
+      rawHtml = fetchXml(htmlOrUrl, false);
     }
-    const cleanedText = cleanHtmlForAI(rawHtml);
+    const cleanedText = cleanHtmlForAI(rawHtml, urlForLog);
     
-    if (!cleanedText) return "ไม่สามารถดึงข้อมูลเนื้อหาหลักของข่าวได้";
+    if (!cleanedText) {
+      return {
+        fullText: "ไม่สามารถดึงข้อมูลเนื้อหาหลักของข่าวได้",
+        imageUrls: []
+      };
+    }
     
     const p = PropertiesService.getScriptProperties();
     const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-2.0-flash";
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
     
     const prompt = `
-You are a news transcription assistant.
-Your job is to read the provided raw webpage content of a Thai news article and extract the full, detailed body text of the article in Thai.
+You are a news transcription and visual data extraction assistant.
+Your job is to read the provided raw webpage content of a Thai news article (which includes [IMAGE_CANDIDATE: url | ALT: description] markers) and extract:
+1. "full_text": The complete, detailed body text of the article in Thai (exclude ads, menus, related articles lists, sign-up forms, and reader comments, and REMOVE all [IMAGE_CANDIDATE] markers from the prose). Keep detailed reporting prose so the reader gets complete information.
+2. "content_images": An array of image URLs (maximum 3 images) selected ONLY from the [IMAGE_CANDIDATE] markers that appear inside the main article body and represent important news charts, graphs, data tables, or infographics summarizing key figures/statistics.
+   - Strictly EXCLUDE site logos, author avatars, social media icons, ads, or thumbnails of other unrelated news articles.
 
-Rules:
-1. ONLY extract the main news article content.
-2. EXCLUDE all advertisements, navigation menus, footer text, sidebar widgets, related articles lists, sign-up forms, and reader comments.
-3. Keep the full detailed reporting prose. Do not summarize it to 3 lines; keep it detailed so the user can read the complete article.
-4. Format the output with clean Thai paragraph breaks.
-5. If there are subheadings in the article, format them with bold text.
-6. Do NOT include any introductory or concluding comments in your output. Just output the extracted news text.
+Output ONLY valid JSON matching this schema:
+{
+  "full_text": "string",
+  "content_images": ["string"]
+}
 `;
 
     const payload = {
@@ -1340,7 +1389,8 @@ Rules:
         }
       ],
       generationConfig: {
-        temperature: 0
+        temperature: 0,
+        responseMimeType: "application/json"
       }
     };
 
@@ -1358,16 +1408,93 @@ Rules:
     const responseJson = JSON.parse(response.getContentText());
     
     if (responseJson.candidates && responseJson.candidates[0].content.parts[0].text) {
-      return responseJson.candidates[0].content.parts[0].text.trim();
+      const parsedResult = JSON.parse(responseJson.candidates[0].content.parts[0].text);
+      return {
+        fullText: (parsedResult.full_text || "").trim(),
+        imageUrls: Array.isArray(parsedResult.content_images) ? parsedResult.content_images : []
+      };
     }
   } catch (e) {
     Logger.log("ERROR extracting full content with Gemini for " + (urlForLog || "unknown URL") + ": " + e.toString());
   }
-  return "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้";
+  return {
+    fullText: "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้",
+    imageUrls: []
+  };
 }
 
-// นำข่าว สรุปย่อ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc (คลีนตามแบบ R_261015.doc)
-function appendNewsToDoc(doc, item, fullText) {
+// ฟังก์ชันดาวน์โหลดและแปลงรูปภาพ (แปลง .webp เป็น .jpg ผ่าน wsrv.nl เพื่อให้ Google Docs รองรับ 100%)
+function fetchArticleImages(html, articleUrl, aiSelectedUrls) {
+  const imageUrls = new Set();
+  
+  // 1. ดึงภาพปกจาก og:image ก่อนเป็นภาพแรก (ถ้ามี)
+  if (html) {
+    const match1 = html.match(/meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+    const match2 = html.match(/meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i);
+    const ogUrl = match1 && match1[1] ? match1[1] : (match2 && match2[1] ? match2[1] : null);
+    if (ogUrl && !ogUrl.startsWith("data:") && !ogUrl.includes(".svg")) {
+      imageUrls.add(ogUrl.trim().replace(/&amp;/g, "&"));
+    }
+  }
+  
+  // 2. ผสานภาพกราฟ/อินโฟกราฟิกในเนื้อหาที่ AI คัดเลือกมา (รวมไม่เกิน 4 ภาพต่อข่าว)
+  if (Array.isArray(aiSelectedUrls)) {
+    aiSelectedUrls.forEach(u => {
+      if (u && imageUrls.size < 4) {
+        imageUrls.add(u.trim().replace(/&amp;/g, "&"));
+      }
+    });
+  }
+  
+  const blobs = [];
+  imageUrls.forEach(rawUrl => {
+    try {
+      let fetchUrl = rawUrl;
+      // หากเป็นไฟล์ webp หรือมี query format=webp ให้แปลงผ่าน wsrv.nl Image Proxy
+      if (rawUrl.toLowerCase().includes(".webp") || rawUrl.toLowerCase().includes("format=webp")) {
+        fetchUrl = "https://wsrv.nl/?url=" + encodeURIComponent(rawUrl) + "&output=jpg";
+      }
+      
+      const response = UrlFetchApp.fetch(fetchUrl, {
+        method: "get",
+        muteHttpExceptions: true,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Referer": articleUrl || ""
+        }
+      });
+      
+      if (response.getResponseCode() === 200) {
+        let blob = response.getBlob();
+        const contentType = (blob.getContentType() || "").toLowerCase();
+        
+        // หากต้นทางยังคืน Content-Type เป็น webp ให้ยิงผ่าน wsrv.nl ซ้ำ
+        if (contentType.includes("webp")) {
+          const proxyResp = UrlFetchApp.fetch("https://wsrv.nl/?url=" + encodeURIComponent(rawUrl) + "&output=jpg", {
+            muteHttpExceptions: true
+          });
+          if (proxyResp.getResponseCode() === 200) {
+            blob = proxyResp.getBlob();
+          } else {
+            return;
+          }
+        }
+        
+        // กรองขนาดไฟล์: ข้ามรูปที่มีขนาดเล็กกว่า 10 KB (ไอคอน หรือปุ่มแชร์ที่อาจหลุดรอดมา)
+        if (blob.getBytes().length > 10240) {
+          blobs.push(blob);
+        }
+      }
+    } catch (err) {
+      Logger.log(`WARNING: ไม่สามารถโหลดรูปภาพได้ (${rawUrl}): ${err.toString()}`);
+    }
+  });
+  
+  return blobs;
+}
+
+// นำข่าว สรุปย่อ รูปภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc (คลีนตามแบบ R_261015.doc)
+function appendNewsToDoc(doc, item, fullText, imageBlobs = []) {
   const body = doc.getBody();
   
   // 1. หัวข้อข่าวหลัก (Font: Cordia New, Size: 16, Bold)
@@ -1416,7 +1543,42 @@ function appendNewsToDoc(doc, item, fullText) {
     }
   }
   
-  // 3. บทความข่าวฉบับเต็ม จัดแยกเป็นย่อหน้าคลีนๆ (Cordia New, Size: 14)
+  // 3. แทรกรูปภาพประกอบ ข้อมูลกราฟิก หรือตารางสถิติ (ถ้ามี)
+  if (imageBlobs && imageBlobs.length > 0) {
+    let headingAdded = false;
+    imageBlobs.forEach(blob => {
+      try {
+        const pImg = body.appendParagraph("");
+        pImg.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+        const image = pImg.appendInlineImage(blob);
+        
+        if (!headingAdded) {
+          const imgIndex = body.getChildIndex(pImg);
+          const imgHeading = body.insertParagraph(imgIndex, `📸 ภาพประกอบและข้อมูลสถิติ/อินโฟกราฟิก (${imageBlobs.length} ภาพ):`);
+          styleParagraph(imgHeading, "Cordia New", 14, "#333333", true, false);
+          imgHeading.setSpacingBefore(8);
+          imgHeading.setSpacingAfter(4);
+          headingAdded = true;
+        }
+        
+        // ปรับขนาดภาพให้พอดีหน้ากระดาษ (สูงสุด 450px) โดยคงอัตราส่วนภาพไว้
+        const originalWidth = image.getWidth();
+        const originalHeight = image.getHeight();
+        const maxWidth = 450;
+        if (originalWidth > maxWidth) {
+          const ratio = maxWidth / originalWidth;
+          image.setWidth(maxWidth);
+          image.setHeight(Math.round(originalHeight * ratio));
+        }
+        pImg.setSpacingBefore(4);
+        pImg.setSpacingAfter(8);
+      } catch (imgErr) {
+        Logger.log(`WARNING: ไม่สามารถแทรกภาพลงใน Google Doc ได้: ${imgErr.toString()}`);
+      }
+    });
+  }
+  
+  // 4. บทความข่าวฉบับเต็ม จัดแยกเป็นย่อหน้าคลีนๆ (Cordia New, Size: 14)
   if (fullText && fullText !== "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้") {
     const paragraphs = fullText.split("\n").map(p => p.trim()).filter(p => p.length > 0);
     paragraphs.forEach((para, pIdx) => {
