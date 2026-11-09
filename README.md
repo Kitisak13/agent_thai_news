@@ -15,11 +15,11 @@ An automated news intelligence system built on Google Apps Script (GAS) that pul
   * Bangkokbiznews (News Sitemap)
   * Matichon (News Sitemap - resolved with ScraperAPI over HTTPS)
   * Prachachat Turakij (RSS Feed - resolved with ScraperAPI over HTTPS)
-* **High-Speed Parallel Ingestion (`fetchAll`):** Downloads webpage HTML in parallel using `UrlFetchApp.fetchAll` (including parallel ScraperAPI routing), slashing execution time from minutes down to 2–3 seconds.
+* **High-Speed Parallel Ingestion (`fetchAll`):** Downloads webpage HTML and article images in parallel using `UrlFetchApp.fetchAll` (including parallel ScraperAPI routing), slashing total execution time to mere seconds.
 * **Zero-Loss Queue Engine (`Doc Status`):** Tracks document synthesis with a persistent `"Pending"` / `"Completed"` state machine in Google Sheets. Automatically resumes unprocessed news across trigger cycles even during zero-news runs, completely eliminating news dropouts.
-* **Infographic & Chart Pipeline:** Automatically extracts news photos, statistical tables, and infographics directly from article HTML, transcodes `.webp` into `.jpg` via Image Proxy (`wsrv.nl`), and embeds them cleanly into Google Docs reports.
+* **Infographic & Chart Pipeline:** Automatically extracts news photos, statistical tables, and infographics directly from article HTML (with support for lazy-loaded and `/uploads/` assets), transcodes `.webp` into `.jpg` via Image Proxy (`wsrv.nl`), and embeds them cleanly into Google Docs reports.
 * **Customizable Keyword Pre-filtering:** Automatically filters news items inside Google Apps Script before calling the AI model to minimize API token usage and cost.
-* **Intelligent AI Analysis (Gemini):** Classifies news categories, translates headlines, summarizes key facts, extracts metrics (prices, quantities, budgets), and evaluates export impact level (`High`, `Medium`, `Low`) using `gemini-2.0-flash` (Free Tier compatible: 1,500 RPD).
+* **Intelligent AI Analysis (Gemini):** Classifies news categories, translates headlines, summarizes key facts, extracts metrics (prices, quantities, budgets), and evaluates export impact level (`High`, `Medium`, `Low`) using `gemini-2.0-flash` with strict JSON `responseSchema` (Free Tier compatible: 1,500 RPD).
 * **Guaranteed Date & Time Integrity:** Strictly maps publish dates directly from authoritative RSS/Sitemap sources (`pubDate` / `<news:publication_date>`) in Thailand timezone (`Asia/Bangkok`), with a 1-hour future clock-skew tolerance.
 * **Concurrency Protection:** Integrated with `LockService` to prevent race conditions and duplicate executions between automated triggers and manual runs.
 * **Anti-Duplicate Sheet Engine:** Compares incoming news links and headlines against rolling historical records (~1,000 recent rows) to prevent recording duplicates without performance degradation.
@@ -37,11 +37,13 @@ An automated news intelligence system built on Google Apps Script (GAS) that pul
   * [walkthrough.md](file:///d:/Project/RSS%20Thai%20News/artifacts/walkthrough.md): Comprehensive guide on installation, trigger setup, and notification previews.
   * [implementation_plan.md](file:///d:/Project/RSS%20Thai%20News/artifacts/implementation_plan.md): Historical project design details.
 * `dev_reviews/`: Code review documents and continuous improvement reports.
+  * [dev_fix4.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix4.md): Fix round 4 covering `/uploads/` regex correction, responseSchema enforcement, parallel image fetch, and status refinement.
   * [dev_fix3.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix3.md): Fix round 3 covering Infographic/Chart pipeline, WebP transcoding, Early Return trap fix, and parallel ScraperAPI routing.
   * [dev_fix2.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix2.md): Fix round 2 covering Zero-loss Queue engine, parallel fetchAll, URL entity fix, and date skew tolerance.
   * [dev_fix1.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix1.md): Fix round 1 covering LockService, HTTPS ScraperAPI, Gemini 2.0 Flash migration, and date accuracy.
-  * [argon_review3.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/argon_review3.md): Gemini Argon round 3 evaluation (9.8/10) with Early Return trap identification.
-  * [claude_review3.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/claude_review3.md): Claude round 3 evaluation on Queue architecture and image pipeline readiness.
+  * [argon_review4.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/argon_review4.md): Gemini Argon round 4 evaluation (9.95/10).
+  * [argon_review3.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/argon_review3.md): Gemini Argon round 3 evaluation (9.8/10).
+  * [claude_review3.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/claude_review3.md): Claude round 3 evaluation.
   * [argon_review2.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/argon_review2.md): Gemini Argon round 2 evaluation (9.7/10).
   * [claude_review2.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/claude_review2.md): Claude round 2 evaluation.
   * [argon_review1.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/argon_review1.md): Gemini Argon round 1 review.
