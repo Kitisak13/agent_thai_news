@@ -53,13 +53,20 @@ const TARGET_THEMES = [
 // 1. ฟังก์ชันหลักสำหรับเริ่มทำงานดึงข่าวผ่าน RSS & Sitemap
 // ==========================================
 function startRssNewsAgent(e) {
-  const p = PropertiesService.getScriptProperties();
-  const apiKey = p.getProperty(PROP_API_KEY);
-  
-  if (!apiKey) {
-    Logger.log("ERROR: กรุณาตั้งค่า GEMINI_API_KEY ใน Script Properties ก่อน");
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    Logger.log("WARNING: ข้ามการทำงานรอบนี้ เนื่องจากมีอินสแตนซ์ของ startRssNewsAgent กำลังทำงานอยู่");
     return;
   }
+  
+  try {
+    const p = PropertiesService.getScriptProperties();
+    const apiKey = p.getProperty(PROP_API_KEY);
+    
+    if (!apiKey) {
+      Logger.log("ERROR: กรุณาตั้งค่า GEMINI_API_KEY ใน Script Properties ก่อน");
+      return;
+    }
   
   // ตรวจเช็คเวลารัน (Allowed Hours Guard Clause) เฉพาะเมื่อรันผ่านทริกเกอร์อัตโนมัติเท่านั้น
   // เพื่อเปิดทางให้ยังสามารถกดปุ่ม Run เพื่อทดสอบแมนนวลด้วยตนเองได้ทุกเมื่อ
@@ -208,7 +215,11 @@ function startRssNewsAgent(e) {
           if (match.pubDate) {
             // ฟอร์แมตวันเวลาในเขตนครหลวงกรุงเทพฯ เช่น 2026-07-23 09:42 น.
             newsItem.publish_date = Utilities.formatDate(match.pubDate, "Asia/Bangkok", "yyyy-MM-dd HH:mm น.");
+          } else {
+            newsItem.publish_date = "ไม่ระบุวันเผยแพร่";
           }
+        } else {
+          newsItem.publish_date = "ไม่ระบุวันเผยแพร่";
         }
       });
     }
@@ -267,8 +278,11 @@ function startRssNewsAgent(e) {
       Logger.log("No new news items to notify.");
     }
     
-  } catch (error) {
-    Logger.log("Exception in startRssNewsAgent processing: " + error.toString());
+    } catch (error) {
+      Logger.log("Exception in startRssNewsAgent processing: " + error.toString());
+    }
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -327,7 +341,7 @@ function fetchXml(url) {
   // ให้วิ่งตรงเข้า ScraperAPI ทันที (รวดเร็ว และ Bypass Cloudflare ได้อย่างแน่นอน)
   if (scraperApiKey) {
     try {
-      const scraperUrl = "http://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url);
+      const scraperUrl = "https://api.scraperapi.com?api_key=" + scraperApiKey + "&url=" + encodeURIComponent(url);
       Logger.log("Fetching via Primary ScraperAPI Proxy for: " + url);
       
       const response = UrlFetchApp.fetch(scraperUrl, {
@@ -347,7 +361,7 @@ function fetchXml(url) {
   // 3. ลองใช้ ScraperAPI คีย์สำรอง (Backup Key) หากคีย์หลักล้มเหลว
   if (backupApiKey) {
     try {
-      const scraperUrl = "http://api.scraperapi.com?api_key=" + backupApiKey + "&url=" + encodeURIComponent(url);
+      const scraperUrl = "https://api.scraperapi.com?api_key=" + backupApiKey + "&url=" + encodeURIComponent(url);
       Logger.log("Fetching via Backup ScraperAPI Proxy for: " + url);
       
       const response = UrlFetchApp.fetch(scraperUrl, {
@@ -680,20 +694,18 @@ ${crossRunDeduplicationSection}
 # Extraction Fields Schema:
 For each relevant news article, extract and return:
 1. ref_id: (integer) The exact "ref_id" value provided in the candidate input item. MUST match the input item.
-2. publish_date: The date the news was published in the format YYYY-MM-DD.
-3. category: Choose one of "ราคาและการค้า", "นโยบายรัฐ", "คู่แข่งและตลาดโลก", "สภาพภูมิอากาศและผลผลิต"
-4. source: The news source name in Thai (e.g. ผู้จัดการออนไลน์, ไทยรัฐ, แนวหน้า, โพสต์ทูเดย์, ฐานเศรษฐกิจ, กรุงเทพธุรกิจ, มติชน, ประชาชาติธุรกิจ)
-5. headline: Headline of the news story translated or polished in Thai
-6. summary: A concise summary of the story in Thai (3-4 lines) containing key facts
-7. metrics: Key numbers/metrics mentioned in the story (e.g., price per ton, export quantities, budget amount) or "ไม่มี" if none
-8. impact: Choose one of "High", "Medium", "Low" based on the impact on Thai agricultural exporters
-9. url: The URL link associated with the story.
+2. category: Choose one of "ราคาและการค้า", "นโยบายรัฐ", "คู่แข่งและตลาดโลก", "สภาพภูมิอากาศและผลผลิต"
+3. source: The news source name in Thai (e.g. ผู้จัดการออนไลน์, ไทยรัฐ, แนวหน้า, โพสต์ทูเดย์, ฐานเศรษฐกิจ, กรุงเทพธุรกิจ, มติชน, ประชาชาติธุรกิจ)
+4. headline: Headline of the news story translated or polished in Thai
+5. summary: A concise summary of the story in Thai (3-4 lines) containing key facts
+6. metrics: Key numbers/metrics mentioned in the story (e.g., price per ton, export quantities, budget amount) or "ไม่มี" if none
+7. impact: Choose one of "High", "Medium", "Low" based on the impact on Thai agricultural exporters
+8. url: The URL link associated with the story.
 
 You must output ONLY a valid JSON array matching the schema:
 [
   {
     "ref_id": 0,
-    "publish_date": "string",
     "category": "string",
     "source": "string",
     "headline": "string",
@@ -711,7 +723,7 @@ You must output ONLY a valid JSON array matching the schema:
 // ==========================================
 function parseCandidatesWithGemini(candidates, apiKey, recentHeadlines = []) {
   const p = PropertiesService.getScriptProperties();
-  const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-1.5-flash"; // gemini-1.5-flash หรือ gemini-2.5-flash
+  const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-2.0-flash"; // gemini-2.0-flash (Free Tier: 1,500 RPD) หรือ gemini-1.5-flash
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
   
   const systemPrompt = getSystemPrompt(recentHeadlines);
@@ -726,6 +738,7 @@ function parseCandidatesWithGemini(candidates, apiKey, recentHeadlines = []) {
       }
     ],
     generationConfig: {
+      temperature: 0,
       responseMimeType: "application/json",
       responseSchema: {
         type: "ARRAY",
@@ -734,7 +747,6 @@ function parseCandidatesWithGemini(candidates, apiKey, recentHeadlines = []) {
           type: "OBJECT",
           properties: {
             ref_id: { type: "INTEGER" },
-            publish_date: { type: "STRING" },
             category: { 
               type: "STRING", 
               enum: ["ราคาและการค้า", "นโยบายรัฐ", "คู่แข่งและตลาดโลก", "สภาพภูมิอากาศและผลผลิต"] 
@@ -749,7 +761,7 @@ function parseCandidatesWithGemini(candidates, apiKey, recentHeadlines = []) {
             },
             url: { type: "STRING" }
           },
-          required: ["ref_id", "publish_date", "category", "source", "headline", "summary", "metrics", "impact", "url"]
+          required: ["ref_id", "category", "source", "headline", "summary", "metrics", "impact", "url"]
         }
       }
     }
@@ -1186,7 +1198,7 @@ function fetchFullContentWithGemini(htmlOrUrl, apiKey, urlForLog) {
     if (!cleanedText) return "ไม่สามารถดึงข้อมูลเนื้อหาหลักของข่าวได้";
     
     const p = PropertiesService.getScriptProperties();
-    const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-1.5-flash";
+    const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-2.0-flash";
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
     
     const prompt = `
@@ -1210,7 +1222,10 @@ Rules:
             { text: "Here is the raw webpage text:\n" + cleanedText }
           ]
         }
-      ]
+      ],
+      generationConfig: {
+        temperature: 0
+      }
     };
 
     const options = {
