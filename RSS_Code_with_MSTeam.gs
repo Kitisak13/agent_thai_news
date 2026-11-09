@@ -227,39 +227,53 @@ function startRssNewsAgent(e) {
     // 5. บันทึกผลลัพธ์ลง Google Sheet แบบ Batch Append (ส่งผ่าน sheet และ keys เพื่อลด Overhead)
     const newItems = saveJsonToSheet(jsonArray, sheet, existingKeys);
     
-    // 6. หากมีข่าวใหม่ ให้ทำเอกสารรายงานและส่งการแจ้งเตือน
-    if (newItems && newItems.length > 0) {
-      let docUrl = "";
+    // 6. ประมวลผลคิวข่าวที่รอลง Google Doc (ดึงทั้งข่าวใหม่และข่าวตกค้างที่ยังค้างสถานะ Pending)
+    let pendingDocItems = [];
+    if (sheet) {
+      pendingDocItems = getPendingDocItems(sheet, 15); // ดึงสูงสุด 15 ข่าวต่อรอบ
+    } else if (newItems && newItems.length > 0) {
+      pendingDocItems = newItems.map(it => ({ ...it, rowNumber: null }));
+    }
+    
+    let docUrl = "";
+    if (pendingDocItems.length > 0) {
       try {
         const folderId = p.getProperty(PROP_DRIVE_FOLDER);
         const doc = getOrCreateDailyDoc(folderId);
         
-        // กำหนดเวลาเริ่มทำงาน และจำกัดโควตาเพื่อป้องกัน Execution Timeout (6 นาที)
+        // กำหนดเวลาเริ่มทำงาน และจำกัดเวลาปลอดภัยที่ 4.5 นาที (เพื่อกัน Google Apps Script 6-Minute Limit)
         const startTime = new Date().getTime();
-        const MAX_DOC_ITEMS_PER_RUN = 8; // สกัดเนื้อหาเต็มลง Google Doc สูงสุด 8 ข่าวต่อรอบเพื่อความปลอดภัย
-        const MAX_PROCESSING_TIME_MS = 4.5 * 60 * 1000; // ตัดจบปลอดภัยที่ 4.5 นาที
+        const MAX_PROCESSING_TIME_MS = 4.5 * 60 * 1000;
         
-        const itemsToProcess = newItems.slice(0, MAX_DOC_ITEMS_PER_RUN);
-        if (newItems.length > MAX_DOC_ITEMS_PER_RUN) {
-          Logger.log(`NOTICE: มีข่าวใหม่ทั้งหมด ${newItems.length} ข่าว ระบบจะสกัดเนื้อหาลง Google Doc จำนวน ${MAX_DOC_ITEMS_PER_RUN} ข่าวแรก เพื่อป้องกัน Execution Timeout`);
-        }
-
-        for (let i = 0; i < itemsToProcess.length; i++) {
-          const item = itemsToProcess[i];
+        Logger.log(`Processing ${pendingDocItems.length} pending items into Google Doc...`);
+        
+        // ดึง HTML ของทุกข่าวพร้อมกันแบบคู่ขนาน (Parallel Fetch) ช่วยลดเวลาจากหลายนาทีเหลือ 2-3 วินาที
+        const targetUrls = pendingDocItems.map(it => it.url);
+        const htmlContents = fetchArticlesParallel(targetUrls);
+        
+        for (let i = 0; i < pendingDocItems.length; i++) {
+          const item = pendingDocItems[i];
           if (new Date().getTime() - startTime > MAX_PROCESSING_TIME_MS) {
-            Logger.log(`WARNING: เวลาประมวลผลใกล้ถึงขีดจำกัด (4.5 นาที) ระบบจะปิดบันทึก Google Doc และส่งการแจ้งเตือนทันที`);
+            Logger.log(`WARNING: เวลาประมวลผลใกล้ถึงขีดจำกัด (4.5 นาที) ระบบจะปิดบันทึก Google Doc ทันที (ข่าวที่เหลือ ${pendingDocItems.length - i} ข่าวจะคงสถานะ Pending ไว้รอรอบถัดไป)`);
             break;
           }
+          
           if (item.url) {
-            Logger.log(`Processing Google Doc content (${i + 1}/${itemsToProcess.length}) for: ${item.headline}`);
-            let htmlContent = null;
+            Logger.log(`Processing Google Doc content (${i + 1}/${pendingDocItems.length}) for: ${item.headline}`);
             try {
-              htmlContent = fetchXml(item.url);
-            } catch (fetchErr) {
-              Logger.log(`WARNING: ไม่สามารถโหลด HTML ข่าวต้นฉบับได้สำหรับ: ${item.headline}. Error: ${fetchErr.toString()}`);
+              const htmlContent = htmlContents[i];
+              const fullText = fetchFullContentWithGemini(htmlContent || item.url, apiKey, item.url);
+              appendNewsToDoc(doc, item, fullText);
+              
+              if (item.rowNumber && sheet) {
+                updateDocStatus(sheet, item.rowNumber, "Completed");
+              }
+            } catch (itemErr) {
+              Logger.log(`ERROR processing article for Doc (${item.headline}): ${itemErr.toString()}`);
+              if (item.rowNumber && sheet) {
+                updateDocStatus(sheet, item.rowNumber, "Error");
+              }
             }
-            const fullText = fetchFullContentWithGemini(htmlContent || item.url, apiKey, item.url);
-            appendNewsToDoc(doc, item, fullText);
           }
         }
         
@@ -270,12 +284,14 @@ function startRssNewsAgent(e) {
       } catch (docError) {
         Logger.log("ERROR managing Google Doc daily report: " + docError.toString());
       }
-      
-      // ส่งการแจ้งเตือนพร้อมส่งแชร์ลิงก์ Google Doc เข้าไปด้วย
+    }
+    
+    // 7. ส่งการแจ้งเตือนเฉพาะเมื่อมีข่าวใหม่ในรอบนี้ (พร้อมแนบลิงก์ Google Doc)
+    if (newItems && newItems.length > 0) {
       sendEmailNotification(newItems, docUrl);      // ส่งแจ้งเตือนผ่าน E-mail
       sendTeamsNotification(newItems, docUrl);     // ส่งแจ้งเตือนผ่าน MS Teams
     } else {
-      Logger.log("No new news items to notify.");
+      Logger.log("No new news items to notify in this cycle.");
     }
     
     } catch (error) {
@@ -290,8 +306,8 @@ function startRssNewsAgent(e) {
 // 2. ฟังก์ชันพาร์สและกรองรูปแบบข้อมูลต่างๆ
 // ==========================================
 
-// ฟังก์ชันดึง XML พร้อมจำลอง User-Agent เพื่อป้องกัน Error 403 และล้าง Entity ที่ไม่ถูกต้องใน XML
-function fetchXml(url) {
+// ฟังก์ชันดึง XML/HTML พร้อมจำลอง User-Agent เพื่อป้องกัน Error 403 (โดยล้าง Entity เฉพาะเมื่อเป็นไฟล์ XML)
+function fetchXml(url, isXml = true) {
   const p = PropertiesService.getScriptProperties();
   const scraperApiKey = p.getProperty(PROP_SCRAPER_KEY);
   const backupApiKey = p.getProperty(PROP_SCRAPER_KEY_BACKUP);
@@ -307,11 +323,12 @@ function fetchXml(url) {
         muteHttpExceptions: true,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/xml, application/xml, application/xhtml+xml, text/html"
+          "Accept": isXml ? "text/xml, application/xml, application/xhtml+xml, text/html" : "text/html, application/xhtml+xml, */*"
         }
       });
       if (response.getResponseCode() === 200) {
-        return sanitizeXmlEntities(response.getContentText());
+        const text = response.getContentText();
+        return isXml ? sanitizeXmlEntities(text) : text;
       }
       Logger.log(`Direct fetch for ${url} returned status ${response.getResponseCode()}. Trying free proxy...`);
     } catch (e) {
@@ -329,7 +346,7 @@ function fetchXml(url) {
         const json = JSON.parse(response.getContentText());
         if (json.contents) {
           Logger.log(`Successfully fetched via AllOrigins Free Proxy for: ${url}`);
-          return sanitizeXmlEntities(json.contents);
+          return isXml ? sanitizeXmlEntities(json.contents) : json.contents;
         }
       }
     } catch (e) {
@@ -350,7 +367,8 @@ function fetchXml(url) {
       });
       const code = response.getResponseCode();
       if (code === 200) {
-        return sanitizeXmlEntities(response.getContentText());
+        const text = response.getContentText();
+        return isXml ? sanitizeXmlEntities(text) : text;
       }
       Logger.log(`Primary ScraperAPI returned HTTP code ${code} for ${url}. Trying backup key...`);
     } catch (e) {
@@ -370,7 +388,8 @@ function fetchXml(url) {
       });
       const code = response.getResponseCode();
       if (code === 200) {
-        return sanitizeXmlEntities(response.getContentText());
+        const text = response.getContentText();
+        return isXml ? sanitizeXmlEntities(text) : text;
       }
       throw new Error(`Backup ScraperAPI returned HTTP code ${code}`);
     } catch (e) {
@@ -379,6 +398,46 @@ function fetchXml(url) {
   }
   
   throw new Error("Failed to fetch content for " + url + " (No working scraper API key available)");
+}
+
+// ฟังก์ชันดึงหน้า HTML ของบทความหลายข่าวพร้อมกันแบบคู่ขนาน (Parallel Fetch) ด้วย UrlFetchApp.fetchAll
+function fetchArticlesParallel(urls) {
+  if (!urls || urls.length === 0) return [];
+  
+  const reqs = urls.map(u => ({
+    url: u,
+    method: "get",
+    muteHttpExceptions: true,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+  }));
+  
+  try {
+    const responses = UrlFetchApp.fetchAll(reqs);
+    return responses.map((resp, i) => {
+      if (resp && resp.getResponseCode() === 200) {
+        return resp.getContentText();
+      }
+      // หากดึงตรงแบบขนานไม่สำเร็จในบางเว็บ (เช่น ติดบล็อก) ให้ลองดึงเดี่ยวผ่าน fetchXml(..., false)
+      try {
+        return fetchXml(urls[i], false);
+      } catch (err) {
+        Logger.log(`Failed individual fallback fetch for: ${urls[i]}`);
+        return null;
+      }
+    });
+  } catch (e) {
+    Logger.log("Parallel fetch encountered error: " + e.toString() + ". Falling back to individual fetching...");
+    return urls.map(u => {
+      try {
+        return fetchXml(u, false);
+      } catch (err) {
+        return null;
+      }
+    });
+  }
 }
 
 // ฟังก์ชันสำหรับแทนที่ HTML Entity ที่ไม่ใช่ XML Entity มาตรฐาน และแปลง Unescaped & ป้องกัน XmlService พัง
@@ -614,13 +673,13 @@ function parseFeedDate(dateStr) {
   return null;
 }
 
-// กรองเฉพาะข่าวที่เผยแพร่ภายใน 24 ชั่วโมงย้อนหลังจากเวลาปัจจุบัน
+// กรองเฉพาะข่าวที่เผยแพร่ภายใน 24 ชั่วโมงย้อนหลังจากเวลาปัจจุบัน (เผื่อเวลานาฬิกาคลาดเคลื่อนล่วงหน้าได้ไม่เกิน 1 ชม.)
 function isWithinLast24Hours(date) {
   if (!date) return false;
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffHours = diffMs / (1000 * 60 * 60);
-  return diffHours >= 0 && diffHours <= 24;
+  return diffHours >= -1 && diffHours <= 24;
 }
 
 // ตัวกรองคำค้นหา (Keyword Filter) เบื้องต้นเพื่อประหยัดโควตา AI พร้อมระบบคัดกรองคำเชิงลบ (Negative Filter)
@@ -810,7 +869,7 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
     return [];
   }
   
-  // หากเป็นหน้าชีตสร้างใหม่และไม่มีแถวข้อมูลเลย ให้พิมพ์หัวข้อคอลัมน์ (Headers) ก่อน
+  // หากเป็นหน้าชีตสร้างใหม่และไม่มีแถวข้อมูลเลย ให้พิมพ์หัวข้อคอลัมน์ (Headers) ก่อน (รวมคอลัมน์ที่ 10: Doc Status)
   if (sheet.getLastRow() === 0) {
     sheet.appendRow([
       "Timestamp",
@@ -821,8 +880,16 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
       "Summary",
       "Key Data & Metrics",
       "Impact Level",
-      "URL"
+      "URL",
+      "Doc Status"
     ]);
+  } else if (sheet.getLastColumn() === 9) {
+    // อัปเกรดชีตเดิมที่ยังไม่มีคอลัมน์ที่ 10 โดยเพิ่ม Header "Doc Status"
+    try {
+      sheet.getRange(1, 10).setValue("Doc Status");
+    } catch (colErr) {
+      Logger.log("Warning setting Doc Status header: " + colErr.toString());
+    }
   }
   
   if (!jsonArray || jsonArray.length === 0) {
@@ -870,7 +937,8 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
         news.summary || "ไม่มีสรุปเนื้อหา",
         news.metrics || "ไม่มี",
         news.impact || "Low",
-        news.url || ""
+        news.url || "",
+        "Pending" // สถานะเริ่มต้นสำหรับคิวทำ Google Doc (ป้องกันข่าวหลุด)
       ]);
       newItems.push(news);
       
@@ -883,11 +951,56 @@ function saveJsonToSheet(jsonArray, sheetObj, existingKeys) {
   
   // 3. เขียนข้อมูลลง Google Sheet แบบชุดเดียว (Batch Write) ประหยัด I/O และทำงานเร็วขึ้น
   if (rowsToAdd.length > 0) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, 9).setValues(rowsToAdd);
-    Logger.log(`Batch saved ${rowsToAdd.length} new news items to Google Sheet.`);
+    sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAdd.length, 10).setValues(rowsToAdd);
+    Logger.log(`Batch saved ${rowsToAdd.length} new news items to Google Sheet with 'Pending' Doc status.`);
   }
   
   return newItems;
+}
+
+// ค้นหาข่าวที่มีสถานะ "Pending" ในชีต เพื่อนำมาใส่ลงใน Google Doc (ดึงทั้งข่าวใหม่และข่าวตกค้างจากรอบก่อน)
+function getPendingDocItems(sheet, limit = 15) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  
+  // อ่านเฉพาะ 200 แถวล่าสุดเพื่อประสิทธิภาพสูงสุด
+  const startRow = Math.max(2, lastRow - 199);
+  const numRows = lastRow - startRow + 1;
+  const numCols = Math.max(sheet.getLastColumn(), 10);
+  const data = sheet.getRange(startRow, 1, numRows, numCols).getValues();
+  
+  const pendingItems = [];
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const rowNumber = startRow + i;
+    const docStatus = (row[9] || "").toString().trim(); // คอลัมน์ J (Doc Status)
+    
+    if (docStatus === "Pending") {
+      pendingItems.push({
+        rowNumber: rowNumber,
+        timestamp: row[0],
+        publish_date: row[1],
+        category: row[2],
+        source: row[3],
+        headline: row[4],
+        summary: row[5],
+        metrics: row[6],
+        impact: row[7],
+        url: row[8]
+      });
+      if (pendingItems.length >= limit) break;
+    }
+  }
+  return pendingItems;
+}
+
+// อัปเดตสถานะการนำข่าวลง Google Doc (Completed / Error) ในแถวที่ระบุ
+function updateDocStatus(sheet, rowNumber, status) {
+  try {
+    sheet.getRange(rowNumber, 10).setValue(status);
+  } catch (e) {
+    Logger.log(`ERROR updating Doc Status for row ${rowNumber}: ${e.toString()}`);
+  }
 }
 
 // ดึงข้อมูลข่าวในชีตที่เคยบันทึกไว้ เพื่อใช้ทำ Pre-Deduplication และ Cross-Run Semantic Deduplication
@@ -898,11 +1011,14 @@ function getExistingNewsKeys(sheet) {
   const recentHeadlines = [];
   
   if (lastRow > 1) { // แถวแรกเป็น Header
-    const data = sheet.getRange(1, 1, lastRow, 9).getValues();
+    const startRow = Math.max(2, lastRow - 999); // อ่านเฉพาะ 1,000 แถวล่าสุด เพื่อลด Overhead เมื่อตารางมีขนาดใหญ่
+    const numRows = lastRow - startRow + 1;
+    const numCols = Math.min(sheet.getLastColumn(), 10);
+    const data = sheet.getRange(startRow, 1, numRows, numCols).getValues();
     const now = new Date().getTime();
     const msIn48Hours = 48 * 60 * 60 * 1000;
     
-    for (let i = 1; i < data.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       const timestampVal = data[i][0]; // คอลัมน์ A (Timestamp)
       const headline = data[i][4];     // คอลัมน์ E (Headline)
       const url = data[i][8];          // คอลัมน์ I (URL)
@@ -1307,7 +1423,8 @@ function appendNewsToDoc(doc, item, fullText) {
       // ตรวจสอบว่าพารากราฟเป็นหัวข้อย่อยหรือไม่ (เช่นขึ้นต้นด้วย ** หรือสั้นและเป็นหัวข้อ)
       const isSubheading = (para.startsWith("**") && para.endsWith("**")) || 
                            (para.startsWith("###") || para.startsWith("##"));
-      const cleanPara = para.replace(/^[*#\s]+|[*#\s]+$/g, "").trim();
+      // ล้างเครื่องหมาย Markdown (** และ #) ที่อาจหลงเหลือในข้อความออกทั้งหมดเพื่อความสะอาดตาของเอกสาร
+      const cleanPara = para.replace(/^[*#\s]+|[*#\s]+$/g, "").replace(/\*\*/g, "").trim();
       if (cleanPara) {
         const pElem = body.appendParagraph(cleanPara);
         if (isSubheading) {

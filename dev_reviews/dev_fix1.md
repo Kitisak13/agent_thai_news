@@ -56,3 +56,4 @@
 ## 4. แผนการปรับปรุงในระยะถัดไป (Next Phase)
 - **Phase 2 (Queue Sheet Architecture):** แยกชีตสำหรับคิวงานเพื่อป้องกันปัญหา Bug A (ข่าวเกิน 8 รายการหลุดหายจาก Google Doc) และป้องกันปัญหาการรันเกินเวลา 6 นาทีของ Apps Script
 - **Phase 3 (Image & Infographic Pipeline):** ปรับปรุงการดึงภาพในบทความ (กราฟ ตารางสถิติ อินโฟกราฟิก) ผ่าน `wsrv.nl` แปลง WebP สู่ JPEG และแทรกลงใน Google Doc อย่างสมบูรณ์
+
