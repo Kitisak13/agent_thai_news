@@ -1239,8 +1239,12 @@ function processPendingDocQueue(sheet, apiKey, folderId, maxItems = 15) {
           appendNewsToDoc(doc, item, fullText, imageBlobs);
 
           if (item.rowNumber) {
-            const isFallback = fullText.includes("ไม่สามารถถอดรายละเอียดข่าวฉบับเต็ม");
-            const finalStatus = isFallback ? "Completed (Summary Only)" : "Completed";
+            const isFallback = fullText.includes(
+              "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็ม",
+            );
+            const finalStatus = isFallback
+              ? "Completed (Summary Only)"
+              : "Completed";
             updateDocStatus(sheet, item.rowNumber, finalStatus);
           }
         } catch (itemErr) {
@@ -1486,7 +1490,7 @@ function sendTeamsNotification(newItems, docUrl) {
 }
 
 // ==========================================
-// 7. ระบบจัดทำเล่มรายงานข่าวสรุปรายวันบน Google Doc (Clean Layout ตามตัวอย่าง R_261015.doc)
+// 7. ระบบจัดทำเล่มรายงานข่าวสรุปรายวันบน Google Doc
 // ==========================================
 
 // ค้นหาหรือสร้างโฟลเดอร์เก็บรายงาน และสร้างหรือเปิดไฟล์ Google Doc ประจำวันสำหรับ Append ข้อมูลข่าว
@@ -1562,9 +1566,15 @@ function cleanHtmlForAI(html, baseUrl) {
     "",
   );
 
-  // 2. สกัดเอาเฉพาะใน body (ถ้ามี)
+  // 2. สกัดเอาเฉพาะใน <article> หรือ <main> หรือ <body> เพื่อตัดเมนูส่วนบนทิ้งให้มากที่สุด
+  const articleMatch = text.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  const mainMatch = text.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
   const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-  if (bodyMatch) {
+  if (articleMatch) {
+    text = articleMatch[1];
+  } else if (mainMatch) {
+    text = mainMatch[1];
+  } else if (bodyMatch) {
     text = bodyMatch[1];
   }
 
@@ -1575,58 +1585,57 @@ function cleanHtmlForAI(html, baseUrl) {
     if (originMatch) origin = originMatch[1];
   }
 
-  // 3. แปลงแท็ก <img> ให้เป็น Text Marker พร้อมดึงลิงก์จาก src, data-src, หรือ data-original (รองรับ Lazy Load)
+  // 3. แปลงแท็ก <img> ให้เป็น Text Marker (แก้บั๊ก loading="lazy" โดนลบทิ้ง)
   text = text.replace(/<img\s+[^>]*>/gi, function (imgTag) {
-    // ข้ามรูปไอคอน โลโก้ แบนเนอร์ หรือตัวติดตามพิกเซล (ใช้ \bads?\b เพื่อไม่ให้ตัดคำว่า upload / uploads / lazyload ทิ้ง)
+    const srcMatch = imgTag.match(
+      /(?:data-src|data-original|data-lazy-src|src)=["']([^"']+)["']/i,
+    );
+    if (!srcMatch || !srcMatch[1]) return "";
+
+    let imgUrl = srcMatch[1].trim().replace(/&amp;/g, "&");
+
+    // กรองเฉพาะ URL ของรูปภาพที่เป็นไอคอน โลโก้ หรือตัวติดตาม (ไม่เช็กคำว่า loading ใน attribute)
     if (
-      /avatar|logo|icon|banner|\bads?\b|advertisement|sponsor|pixel|button|share|emoji|author|profile|sprite|placeholder|loading/i.test(
-        imgTag,
+      imgUrl.startsWith("data:image") ||
+      /\.svg(\?|$)/i.test(imgUrl) ||
+      /\.gif(\?|$)/i.test(imgUrl) ||
+      /avatar|logo|icon|banner|\bads?\b|advertisement|sponsor|pixel|button|share|emoji|author|profile|sprite|placeholder/i.test(
+        imgUrl,
       )
     ) {
       return "";
     }
 
-    const srcMatch = imgTag.match(
-      /(?:data-src|data-original|data-lazy-src|src)=["']([^"']+)["']/i,
-    );
-    const altMatch = imgTag.match(/alt=["']([^"']*)["']/i);
-
-    if (srcMatch && srcMatch[1]) {
-      let imgUrl = srcMatch[1].trim().replace(/&amp;/g, "&");
-      if (
-        imgUrl.startsWith("data:image") ||
-        imgUrl.endsWith(".svg") ||
-        imgUrl.endsWith(".gif")
-      ) {
-        return "";
-      }
-
-      // แปลง Relative URL เป็น Absolute URL
-      if (imgUrl.startsWith("//")) {
-        imgUrl = "https:" + imgUrl;
-      } else if (imgUrl.startsWith("/") && origin) {
-        imgUrl = origin + imgUrl;
-      }
-
-      const altText = altMatch ? altMatch[1].trim() : "";
-      return `\n[IMAGE_CANDIDATE: ${imgUrl} | ALT: ${altText}]\n`;
+    // แปลง Relative URL เป็น Absolute URL
+    if (imgUrl.startsWith("//")) {
+      imgUrl = "https:" + imgUrl;
+    } else if (imgUrl.startsWith("/") && origin) {
+      imgUrl = origin + imgUrl;
     }
-    return "";
+
+    const altMatch = imgTag.match(/alt=["']([^"']*)["']/i);
+    const altText = altMatch ? altMatch[1].trim() : "";
+    return `\n[IMAGE_CANDIDATE: ${imgUrl} | ALT: ${altText}]\n`;
   });
 
-  // 4. แปลง closing tag ของย่อหน้า/บล็อก ให้เป็นขึ้นบรรทัดใหม่ แล้วลบ HTML Tags อื่นๆ ทั้งหมด
-  text = text.replace(/<\/(p|div|h[1-6]|li|br|figure|figcaption)>/gi, "\n");
+  // 4. แก้ไข: แปลงแท็ก <br> ทุกรูปแบบ (<br>, <br/>, <br />) และแท็กบล็อกทั้งเปิดและปิดให้เป็นขึ้นบรรทัดใหม่
+  text = text.replace(/<br\s*\/?>/gi, "\n");
+  text = text.replace(
+    /<\/?(p|div|h[1-6]|li|ul|ol|blockquote|section|article|figure|figcaption|tr)[^>]*>/gi,
+    "\n\n",
+  );
   text = text.replace(/<[^>]+>/g, " ");
 
-  // 5. ล้างช่องว่างและบรรทัดว่างที่ซ้ำซ้อน
+  // 5. แก้ไข: ล้างช่องว่างในบรรทัดเดียวกัน แต่คงการเว้นย่อหน้า (\n\n) เอาไว้ให้ AI เห็นชัดเจน
   text = text
+    .replace(/&nbsp;/gi, " ")
     .replace(/[ \t]+/g, " ")
-    .replace(/\n\s*\n/g, "\n")
+    .replace(/\n\s*\n+/g, "\n\n")
     .trim();
 
-  // 6. ตัดความยาวสูงสุดที่ 45,000 ตัวอักษร
-  if (text.length > 45000) {
-    text = text.substring(0, 45000);
+  // 6. ขยายความยาวสูงสุดเป็น 80,000 ตัวอักษร เพื่อไม่ให้รูปกลางบทความถูกตัดทิ้ง
+  if (text.length > 80000) {
+    text = text.substring(0, 80000);
   }
   return text;
 }
@@ -1651,12 +1660,17 @@ function fetchFullContentWithGemini(htmlOrUrl, apiKey, urlForLog) {
     const modelName = p.getProperty(PROP_MODEL_NAME) || "gemini-2.0-flash";
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
+    // ปรับ Prompt บังคับให้รักษา Paragraph Breaks ด้วย \n\n อย่างชัดเจน
     const prompt = `
 You are a news transcription and visual data extraction assistant.
 Your job is to read the provided raw webpage content of a Thai news article (which includes [IMAGE_CANDIDATE: url | ALT: description] markers) and extract:
-1. "full_text": The complete, detailed body text of the article in Thai (exclude ads, menus, related articles lists, sign-up forms, and reader comments, and REMOVE all [IMAGE_CANDIDATE] markers from the prose). Keep detailed reporting prose with clean Thai paragraph breaks. If there are subheadings in the article, format them with bold text (**Subheading**).
-2. "content_images": An array of image URLs (maximum 3 images) selected ONLY from the [IMAGE_CANDIDATE] markers that appear inside the main article body and represent important news charts, graphs, data tables, or infographics summarizing key figures/statistics.
+1. "full_text": The complete, detailed body text of the article in Thai (exclude ads, menus, related articles lists, sign-up forms, and reader comments, and REMOVE all [IMAGE_CANDIDATE] markers from the prose).
+   - CRITICAL PARAGRAPH RULE: You MUST separate every paragraph and subheading using double newline characters ("\\n\\n").
+   - Never return the entire article as a single giant block of text. Preserve original paragraph breaks, and if the source text has merged paragraphs, logically split the Thai prose into readable paragraphs (every 3-5 sentences or whenever the speaker/topic shifts) using "\\n\\n".
+   - If there are subheadings in the article, format them on their own line with bold text (**Subheading**) followed by "\\n\\n".
+2. "content_images": An array of image URLs (maximum 4 images) selected ONLY from the [IMAGE_CANDIDATE] markers that appear INSIDE the main article body (such as infographics, charts, tables, statistics graphics, or inline article photos embedded between paragraphs).
    - Strictly EXCLUDE site logos, author avatars, social media icons, ads, or thumbnails of other unrelated news articles.
+   - Return an empty array [] if there are no relevant images inside the article body.
 
 Output ONLY valid JSON matching this schema:
 {
@@ -1683,11 +1697,11 @@ Output ONLY valid JSON matching this schema:
             full_text: { type: "STRING" },
             content_images: {
               type: "ARRAY",
-              items: { type: "STRING" }
-            }
+              items: { type: "STRING" },
+            },
           },
-          required: ["full_text", "content_images"]
-        }
+          required: ["full_text", "content_images"],
+        },
       },
     };
 
@@ -1736,26 +1750,14 @@ Output ONLY valid JSON matching this schema:
 function fetchArticleImages(html, articleUrl, aiSelectedUrls) {
   const imageUrls = new Set();
 
-  // 1. ดึงภาพปกจาก og:image ก่อนเป็นภาพแรก (ถ้ามี)
-  if (html) {
-    const match1 = html.match(
-      /meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i,
-    );
-    const match2 = html.match(
-      /meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i,
-    );
-    const ogUrl =
-      match1 && match1[1] ? match1[1] : match2 && match2[1] ? match2[1] : null;
-    if (ogUrl && !ogUrl.startsWith("data:") && !ogUrl.includes(".svg")) {
-      imageUrls.add(ogUrl.trim().replace(/&amp;/g, "&"));
-    }
-  }
-
-  // 2. ผสานภาพกราฟ/อินโฟกราฟิกในเนื้อหาที่ AI คัดเลือกมา (รวมไม่เกิน 4 ภาพต่อข่าว)
+  // ดึงเฉพาะภาพประกอบ / Infographic ที่อยู่ใน Content ข่าวที่ AI คัดเลือกมา (ไม่ดึง og:image หน้าปกข่าวแล้ว)
   if (Array.isArray(aiSelectedUrls)) {
     aiSelectedUrls.forEach((u) => {
       if (u && imageUrls.size < 4) {
-        imageUrls.add(u.trim().replace(/&amp;/g, "&"));
+        const cleanUrl = u.trim().replace(/&amp;/g, "&");
+        if (!cleanUrl.startsWith("data:") && !/\.svg(\?|$)/i.test(cleanUrl)) {
+          imageUrls.add(cleanUrl);
+        }
       }
     });
   }
@@ -1764,10 +1766,15 @@ function fetchArticleImages(html, articleUrl, aiSelectedUrls) {
   if (urlList.length === 0) return [];
 
   // เตรียมคำขอสำหรับดาวน์โหลดภาพแบบคู่ขนาน (Parallel Image Fetching)
-  const reqs = urlList.map(rawUrl => {
+  const reqs = urlList.map((rawUrl) => {
     let fetchUrl = rawUrl;
-    if (rawUrl.toLowerCase().includes(".webp") || rawUrl.toLowerCase().includes("format=webp")) {
-      fetchUrl = "https://wsrv.nl/?url=" + encodeURIComponent(rawUrl) + "&output=jpg";
+    // แปลง .webp หรือ URL ที่มีพารามิเตอร์ webp (เช่น ?x-image-process=style/lg-webp) เป็น .jpg ผ่าน wsrv.nl
+    if (
+      rawUrl.toLowerCase().includes(".webp") ||
+      rawUrl.toLowerCase().includes("webp")
+    ) {
+      fetchUrl =
+        "https://wsrv.nl/?url=" + encodeURIComponent(rawUrl) + "&output=jpg";
     }
     return {
       url: fetchUrl,
@@ -1775,8 +1782,8 @@ function fetchArticleImages(html, articleUrl, aiSelectedUrls) {
       muteHttpExceptions: true,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Referer: articleUrl || ""
-      }
+        Referer: articleUrl || "",
+      },
     };
   });
 
@@ -1793,8 +1800,10 @@ function fetchArticleImages(html, articleUrl, aiSelectedUrls) {
           try {
             const rawUrl = urlList[idx];
             const proxyResp = UrlFetchApp.fetch(
-              "https://wsrv.nl/?url=" + encodeURIComponent(rawUrl) + "&output=jpg",
-              { muteHttpExceptions: true }
+              "https://wsrv.nl/?url=" +
+                encodeURIComponent(rawUrl) +
+                "&output=jpg",
+              { muteHttpExceptions: true },
             );
             if (proxyResp.getResponseCode() === 200) {
               blob = proxyResp.getBlob();
@@ -1819,7 +1828,7 @@ function fetchArticleImages(html, articleUrl, aiSelectedUrls) {
   return blobs;
 }
 
-// นำข่าว สรุปย่อ รูปภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc (คลีนตามแบบ R_261015.doc)
+// นำข่าว สรุปย่อ รูปภาพประกอบ และข่าวฉบับเต็มไปเขียนบันทึกใน Google Doc
 function appendNewsToDoc(doc, item, fullText, imageBlobs = []) {
   const body = doc.getBody();
 
@@ -1920,31 +1929,41 @@ function appendNewsToDoc(doc, item, fullText, imageBlobs = []) {
 
   // 4. บทความข่าวฉบับเต็ม จัดแยกเป็นย่อหน้าคลีนๆ (Cordia New, Size: 14)
   if (fullText && fullText !== "ไม่สามารถถอดรายละเอียดข่าวฉบับเต็มโดย AI ได้") {
-    const paragraphs = fullText
-      .split("\n")
+    // ปรับปรุง: รองรับทั้ง literal \n, \r\n หรือขึ้นบรรทัดใหม่ปกติ
+    const normalizedText = fullText
+      .replace(/\\n/g, "\n")
+      .replace(/\r\n/g, "\n");
+
+    const paragraphs = normalizedText
+      .split(/\n+/)
       .map((p) => p.trim())
       .filter((p) => p.length > 0);
+
     paragraphs.forEach((para, pIdx) => {
-      // ตรวจสอบว่าพารากราฟเป็นหัวข้อย่อยหรือไม่ (เช่นขึ้นต้นด้วย ** หรือสั้นและเป็นหัวข้อ)
+      // ตรวจสอบว่าพารากราฟเป็นหัวข้อย่อยหรือไม่ (เช่นขึ้นต้นด้วย ** หรือ ###)
       const isSubheading =
         (para.startsWith("**") && para.endsWith("**")) ||
         para.startsWith("###") ||
         para.startsWith("##");
-      // ล้างเครื่องหมาย Markdown (** และ #) ที่อาจหลงเหลือในข้อความออกทั้งหมดเพื่อความสะอาดตาของเอกสาร
+
+      // ล้างเครื่องหมาย Markdown (** และ #) ที่อาจหลงเหลือในข้อความออกทั้งหมด
       const cleanPara = para
         .replace(/^[*#\s]+|[*#\s]+$/g, "")
         .replace(/\*\*/g, "")
         .trim();
+
       if (cleanPara) {
         const pElem = body.appendParagraph(cleanPara);
+        pElem.setLineSpacing(1.15); // ช่วยให้อ่านสบายตาขึ้น
+
         if (isSubheading) {
           styleParagraph(pElem, "Cordia New", 14, "#000000", true, false);
-          pElem.setSpacingBefore(pIdx === 0 ? 10 : 6);
-          pElem.setSpacingAfter(3);
+          pElem.setSpacingBefore(pIdx === 0 ? 10 : 10);
+          pElem.setSpacingAfter(4);
         } else {
           styleParagraph(pElem, "Cordia New", 14, "#000000", false, false);
           pElem.setSpacingBefore(pIdx === 0 ? 10 : 0);
-          pElem.setSpacingAfter(4);
+          pElem.setSpacingAfter(10); // ปรับระยะห่างท้ายพารากราฟเป็น 10 pt ให้เห็นการเว้นบรรทัดชัดเจน
         }
       }
     });
@@ -1954,10 +1973,10 @@ function appendNewsToDoc(doc, item, fullText, imageBlobs = []) {
     );
     styleParagraph(fallbackPara, "Cordia New", 14, "#000000", false, false);
     fallbackPara.setSpacingBefore(10);
-    fallbackPara.setSpacingAfter(6);
+    fallbackPara.setSpacingAfter(10);
   }
 
-  // 4. Source และ URL ใต้เนื้อหาข่าว คลีนแบบ R_261015.doc (เพิ่ม URL อีกบรรทัดใต้ Source)
+  // 5. Source และ URL ใต้เนื้อหาข่าว คลีนแบบรายงานทางการ
   const sourceName = item.source || "ไม่ระบุ";
   const sourcePrefix =
     !sourceName.startsWith("หนังสือพิมพ์") &&
@@ -1983,7 +2002,7 @@ function appendNewsToDoc(doc, item, fullText, imageBlobs = []) {
     urlParagraph.setSpacingAfter(10);
   }
 
-  // 5. เส้นคั่นระหว่างข่าว
+  // 6. เส้นคั่นระหว่างข่าว
   body.appendHorizontalRule();
 }
 

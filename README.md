@@ -37,6 +37,8 @@ An automated news intelligence system built on Google Apps Script (GAS) that pul
   * [walkthrough.md](file:///d:/Project/RSS%20Thai%20News/artifacts/walkthrough.md): Comprehensive guide on installation, trigger setup, and notification previews.
   * [implementation_plan.md](file:///d:/Project/RSS%20Thai%20News/artifacts/implementation_plan.md): Historical project design details.
 * `dev_reviews/`: Code review documents and continuous improvement reports.
+  * [dev_fix5.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix5.md): Fix round 5 resolving lazy-loading image filtering, expanded content buffer (80K chars), and pure content infographic extraction.
+  * [review1.md](file:///d:/Project/RSS%20Thai%20News/dev_review/review1.md): Technical review analyzing infographic extraction failure.
   * [dev_fix4.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix4.md): Fix round 4 covering `/uploads/` regex correction, responseSchema enforcement, parallel image fetch, and status refinement.
   * [dev_fix3.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix3.md): Fix round 3 covering Infographic/Chart pipeline, WebP transcoding, Early Return trap fix, and parallel ScraperAPI routing.
   * [dev_fix2.md](file:///d:/Project/RSS%20Thai%20News/dev_reviews/dev_fix2.md): Fix round 2 covering Zero-loss Queue engine, parallel fetchAll, URL entity fix, and date skew tolerance.
